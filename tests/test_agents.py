@@ -16,21 +16,25 @@ def _resolve(monkeypatch):
     monkeypatch.setattr(runner, "resolve_bin", lambda name: name)
 
 
-def test_worker_command_flags(settings):
-    cmd = ClaudeWorker(settings).build_command()
+def test_worker_command_flags(settings, tmp_path):
+    cmd = ClaudeWorker(settings).build_command(tmp_path / "7")
     assert cmd[:2] == ["claude", "-p"]
     disallowed = cmd[cmd.index("--disallowedTools") + 1]
     assert "Skill" in disallowed.split(",")
     assert "WebSearch" in disallowed and "WebFetch" in disallowed
     assert "--strict-mcp-config" in cmd
     assert "--no-session-persistence" in cmd
-    assert cmd[cmd.index("--append-system-prompt") + 1] == "Ты — исполнитель."
+    assert cmd[cmd.index("--append-system-prompt-file") + 1] == str(tmp_path / "7" / "worker_system.md")
+    assert cmd[cmd.index("--settings") + 1] == str(tmp_path / "7" / "worker_settings.json")
+    # в аргументах процесса (видны в ps) нет ни текста промпта, ни списка путей
+    joined = " ".join(cmd)
+    assert "исполнитель" not in joined and "deny" not in joined
     assert "--dangerously-skip-permissions" not in cmd
 
 
-def test_worker_web_flag(settings):
+def test_worker_web_flag(settings, tmp_path):
     settings.worker_web = True
-    cmd = ClaudeWorker(settings).build_command()
+    cmd = ClaudeWorker(settings).build_command(tmp_path / "7")
     assert "WebSearch" in cmd[cmd.index("--allowedTools") + 1]
     assert cmd[cmd.index("--disallowedTools") + 1] == "Skill"
 
@@ -48,6 +52,10 @@ async def test_worker_runs_in_workspace(settings, tmp_path):
     assert seen["cwd"] == ws and ws.is_dir()
     assert seen["timeout"] == settings.worker_timeout
     assert "блокнот" in seen["stdin"]
+    # промпт и настройки — файлами рядом с workspace, не внутри него
+    assert (ws.parent / "worker_system.md").read_text(encoding="utf-8") == "Ты — исполнитель."
+    assert json.loads((ws.parent / "worker_settings.json").read_text(encoding="utf-8"))["permissions"]["deny"]
+    assert not (ws / "worker_system.md").exists()
     # TASKS_DIR вне проекта
     project = Path(__file__).resolve().parents[1]
     assert project not in ws.resolve().parents

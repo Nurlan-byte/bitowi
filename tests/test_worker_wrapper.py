@@ -103,7 +103,7 @@ def test_worker_sudo_command(settings, monkeypatch):
 
     monkeypatch.setattr(runner, "resolve_bin", lambda name: f"/usr/bin/{name}")
     settings.worker_mode = "sudo"
-    cmd = ClaudeWorker(settings).build_command("42")
+    cmd = ClaudeWorker(settings).build_command(settings.tasks_dir / "42")
     assert cmd[:7] == [
         "/usr/bin/sudo", "-n", "-u", "bitowi-worker", "/usr/local/bin/bitowi-worker-run", "42", str(settings.worker_timeout),
     ]

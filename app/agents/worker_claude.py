@@ -1,4 +1,8 @@
-"""Worker backed by Claude Code CLI (`claude -p`)."""
+"""Worker backed by Claude Code CLI (`claude -p`).
+
+WORKER_MODE=sudo runs it as a separate Linux user through deploy/bitowi-worker-run,
+so the worker cannot read the project, boss files or CLI logins of the bot's user.
+"""
 
 import json
 import logging
@@ -12,13 +16,16 @@ log = logging.getLogger(__name__)
 
 PROJECT_DIR = Path(__file__).resolve().parents[2]
 
-ALLOWED_TOOLS ="Read,Write,Edit,Bash(python3:*)"
+ALLOWED_TOOLS = "Read,Write,Edit,Bash(python3:*)"
 WEB_TOOLS = "WebSearch,WebFetch"
 
 PROMPT_HEADER = (
     "Заказчик обновил общий рабочий блокнот. Ниже он целиком. "
     "Ответь на последнее задание с учётом всех замечаний.\n\n"
 )
+
+# запас поверх таймаута обёртки (timeout --kill-after=10 внутри)
+SUDO_GRACE = 30
 
 
 class ClaudeWorker(Worker):
@@ -45,11 +52,10 @@ class ClaudeWorker(Worker):
             "permissions": {"deny": deny},
         })
 
-    def build_command(self) -> list[str]:
+    def claude_args(self) -> list[str]:
         allowed = ALLOWED_TOOLS + ("," + WEB_TOOLS if self.settings.worker_web else "")
         disallowed = "Skill" + ("" if self.settings.worker_web else "," + WEB_TOOLS)
         return [
-            runner.resolve_bin(self.settings.claude_bin),
             "-p",
             "--output-format", "json",
             "--append-system-prompt", self.settings.prompt("worker.md"),
@@ -61,12 +67,22 @@ class ClaudeWorker(Worker):
             "--settings", self.sandbox_settings(),
         ]
 
+    def build_command(self, task_id: str = "0") -> list[str]:
+        if self.settings.worker_mode == "sudo":
+            return [
+                runner.resolve_bin("sudo"), "-n", "-u", self.settings.worker_user,
+                self.settings.worker_runner, task_id, str(self.settings.worker_timeout),
+                *self.claude_args(),
+            ]
+        return [runner.resolve_bin(self.settings.claude_bin), *self.claude_args()]
+
     async def solve(self, notebook_text: str, workspace: Path) -> str:
         workspace.mkdir(parents=True, exist_ok=True)
+        sudo = self.settings.worker_mode == "sudo"
         res = await self._run(
-            self.build_command(),
+            self.build_command(workspace.parent.name),
             cwd=workspace,
-            timeout=self.settings.worker_timeout,
+            timeout=self.settings.worker_timeout + (SUDO_GRACE if sudo else 0),
             stdin=PROMPT_HEADER + notebook_text,
         )
         return parse_output(res)
@@ -79,6 +95,10 @@ def parse_output(res: runner.RunResult) -> str:
         data = None
     if not isinstance(data, dict):
         text = res.stderr + res.stdout
+        if "sudo:" in res.stderr or "bitowi-worker-run:" in res.stderr:
+            raise AgentError(f"Запуск исполнителя от отдельного пользователя не настроен: {res.stderr.strip()[:300]}")
+        if res.returncode in (124, 137):
+            raise AgentError("Исполнитель остановлен по таймауту обёртки")
         if runner.looks_like_limit(text):
             raise AgentLimit(text.strip()[:300])
         raise AgentError(f"Исполнитель: код {res.returncode}, вывод не JSON: {text.strip()[:300]}")

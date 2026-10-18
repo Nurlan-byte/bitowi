@@ -38,16 +38,28 @@ def resolve_bin(name: str) -> str:
     return found
 
 
-def _kill(proc: asyncio.subprocess.Process) -> None:
-    if proc.returncode is not None:
-        return
+def _signal(proc: asyncio.subprocess.Process, sig: int) -> None:
     try:
         if sys.platform != "win32":
-            os.killpg(proc.pid, signal.SIGKILL)
+            os.killpg(proc.pid, sig)
         else:
             proc.kill()
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
+        # PermissionError: часть группы — процессы другого пользователя (sudo);
+        # их останавливает timeout внутри обёртки
         pass
+
+
+async def _stop(proc: asyncio.subprocess.Process, grace: float = 10.0) -> None:
+    """SIGTERM first (sudo relays it to the command), SIGKILL after `grace` seconds."""
+    if proc.returncode is not None:
+        return
+    _signal(proc, signal.SIGTERM if sys.platform != "win32" else 0)
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=grace)
+    except asyncio.TimeoutError:
+        _signal(proc, signal.SIGKILL if sys.platform != "win32" else 0)
+        await proc.wait()
 
 
 async def run(cmd: list[str], *, cwd: Path, timeout: float, stdin: str | None = None) -> RunResult:
@@ -65,12 +77,10 @@ async def run(cmd: list[str], *, cwd: Path, timeout: float, stdin: str | None = 
     try:
         out, err = await asyncio.wait_for(proc.communicate(data), timeout=timeout)
     except asyncio.TimeoutError:
-        _kill(proc)
-        await proc.wait()
+        await _stop(proc)
         raise AgentTimeout(f"{Path(cmd[0]).name}: таймаут {timeout} с")
     except asyncio.CancelledError:
-        _kill(proc)
-        await proc.wait()
+        await asyncio.shield(_stop(proc))
         raise
     return RunResult(
         proc.returncode or 0,

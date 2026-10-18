@@ -1,0 +1,40 @@
+#!/bin/bash
+# Запуск исполнителя от пользователя bitowi-worker.
+#   sudo -n -u bitowi-worker /usr/local/bin/bitowi-worker-run <task_id> <timeout_sec> [флаги claude...]
+# Установка (root): install -o root -g root -m 755 deploy/bitowi-worker-run /usr/local/bin/bitowi-worker-run
+set -euo pipefail
+
+readonly TASKS_DIR=/srv/bitowi/tasks
+readonly WORKER_USER=bitowi-worker
+readonly CLAUDE=/home/bitowi-worker/.local/bin/claude
+
+export HOME=/home/bitowi-worker
+export PATH=/home/bitowi-worker/.local/bin:/usr/local/bin:/usr/bin:/bin
+export LANG=C.UTF-8
+export LC_ALL=C.UTF-8
+# файлы исполнителя — для группы bitowi-tasks, остальным ничего
+umask 007
+
+die() {
+    echo "bitowi-worker-run: $1" >&2
+    exit 64
+}
+
+[[ "$(id -un)" == "$WORKER_USER" ]] || die "запускать только от $WORKER_USER"
+(( $# >= 2 )) || die "использование: bitowi-worker-run <task_id> <timeout_sec> [флаги claude...]"
+
+task_id=$1
+timeout_sec=$2
+shift 2
+
+[[ "$task_id" =~ ^[0-9]{1,9}$ ]] || die "неверный номер задачи"
+[[ "$timeout_sec" =~ ^[0-9]{1,5}$ ]] || die "неверный таймаут"
+(( timeout_sec > 0 )) || die "неверный таймаут"
+
+workspace="$TASKS_DIR/$task_id/workspace"
+real="$(realpath -e -- "$workspace")" || die "нет папки задачи"
+[[ "$real" == "$workspace" ]] || die "папка задачи вне $TASKS_DIR"
+[[ -x "$CLAUDE" ]] || die "не найден $CLAUDE"
+
+cd -- "$real"
+exec timeout --kill-after=10 "$timeout_sec" "$CLAUDE" "$@"

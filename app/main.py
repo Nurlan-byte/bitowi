@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 
 from aiogram import Bot, Dispatcher
 
@@ -17,6 +18,8 @@ from app.orchestrator import Orchestrator
 
 async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    # файлы задач — для группы bitowi-tasks (бот и исполнитель), остальным ничего
+    os.umask(0o007)
     settings = get_settings()
     if not settings.bot_token:
         raise SystemExit("BOT_TOKEN не задан в .env")

@@ -2,6 +2,10 @@
 
 Correct answers are known (QUIZZES). /_stats counts submissions and «Показать ответ» clicks,
 so tests can assert the extraction step never pressed them.
+
+The worker can reach localhost from python3, so nothing that reveals answers is served without
+a login (FAKE_LMS_USER / FAKE_LMS_PASSWORD, no default password) and service endpoints need
+the X-LMS-Token header (FAKE_LMS_TOKEN).
 """
 
 import html
@@ -11,9 +15,16 @@ import secrets
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
-USER = os.environ.get("FAKE_LMS_USER", "student")
-PASSWORD = os.environ.get("FAKE_LMS_PASSWORD", "student")
 MAX_ATTEMPTS = 3
+
+
+def _creds() -> tuple[str, str]:
+    return os.environ.get("FAKE_LMS_USER", "student"), os.environ.get("FAKE_LMS_PASSWORD", "")
+
+
+def _token_ok(request: Request) -> bool:
+    token = os.environ.get("FAKE_LMS_TOKEN", "")
+    return bool(token) and secrets.compare_digest(request.headers.get("X-LMS-Token", ""), token)
 
 QUIZZES: dict[int, dict] = {
     1: {
@@ -43,7 +54,8 @@ QUIZZES: dict[int, dict] = {
     },
 }
 
-app = FastAPI(title="Мини-LMS")
+# без /docs и /openapi.json — ничего лишнего анонимам
+app = FastAPI(title="Мини-LMS", docs_url=None, redoc_url=None, openapi_url=None)
 SESSIONS: set[str] = set()
 STATS = {"submit": 0, "show_answer": 0, "logins": 0}
 ATTEMPTS: dict[int, int] = {}
@@ -98,7 +110,9 @@ async def login_form(next: str = "/"):
 @app.post("/login")
 async def login(request: Request):
     form = await request.form()
-    if form.get("username") != USER or form.get("password") != PASSWORD:
+    user, password = _creds()
+    ok = bool(password) and form.get("username") == user and secrets.compare_digest(str(form.get("password") or ""), password)
+    if not ok:
         return page("Вход", '<p class="wrong">Неверный логин или пароль.</p><p><a href="/login">Ещё раз</a></p>')
     sid = secrets.token_hex(16)
     SESSIONS.add(sid)
@@ -176,18 +190,30 @@ async def submit(request: Request, quiz_id: int):
 
 
 @app.post("/quiz/{quiz_id}/show-answer")
-async def show_answer(quiz_id: int):
+async def show_answer(request: Request, quiz_id: int):
+    if not logged_in(request):
+        return need_login(request)
+    q = QUIZZES.get(quiz_id)
+    if not q:
+        return page("Не найдено", "<p>Нет такого теста.</p>")
     STATS["show_answer"] += 1
-    return page("Ответы", "<p>Правильные ответы показаны.</p>")
+    items = "".join(
+        f"<li>{html.escape(item['text'])} — {html.escape(', '.join(item['correct']))}</li>" for item in q["questions"]
+    )
+    return page("Ответы", f"<ol>{items}</ol>")
 
 
 @app.get("/_stats")
-async def stats():
+async def stats(request: Request):
+    if not _token_ok(request):
+        return JSONResponse({"error": "forbidden"}, status_code=403)
     return JSONResponse({**STATS, "attempts": ATTEMPTS})
 
 
 @app.post("/_reset")
-async def reset():
+async def reset(request: Request):
+    if not _token_ok(request):
+        return JSONResponse({"error": "forbidden"}, status_code=403)
     STATS.update(submit=0, show_answer=0, logins=0)
     ATTEMPTS.clear()
     SESSIONS.clear()

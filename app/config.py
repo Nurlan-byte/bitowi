@@ -2,6 +2,7 @@
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -24,6 +25,10 @@ class Settings(BaseSettings):
     # песочница bubblewrap для воркера (Linux). На Ubuntu 26.04 AppArmor (bwrap-userns-restrict)
     # не даёт ей стартовать — включать только после решения владельца по AppArmor
     worker_sandbox: bool = False
+    # local — claude от текущего пользователя (разработка); sudo — от WORKER_USER через обёртку
+    worker_mode: Literal["local", "sudo"] = "local"
+    worker_user: str = "bitowi-worker"
+    worker_runner: str = "/usr/local/bin/bitowi-worker-run"
 
     data_dir: Path = Path("./data")
     tasks_dir: Path = Path("~/bitowi_data/tasks")
@@ -43,7 +48,7 @@ class Settings(BaseSettings):
     demo_moodle_password: str = ""
     fake_lms_host: str = "127.0.0.1:8765"
     fake_lms_user: str = "student"
-    fake_lms_password: str = "student"
+    fake_lms_password: str = ""
 
     @field_validator("data_dir", "tasks_dir", "prompts_dir", mode="after")
     @classmethod

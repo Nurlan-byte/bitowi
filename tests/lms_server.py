@@ -1,12 +1,19 @@
 """Mini LMS in a background thread for e2e/live tests."""
 
 import json
+import os
+import secrets
 import socket
 import threading
 import time
 import urllib.request
 
 import pytest
+
+# пароль и токен — случайные на каждый прогон, как и должно быть на сервере
+LMS_USER = "student"
+LMS_PASSWORD = secrets.token_hex(8)
+LMS_TOKEN = secrets.token_hex(8)
 
 
 def _free_port() -> int:
@@ -18,6 +25,8 @@ def _free_port() -> int:
 @pytest.fixture(scope="module")
 def lms():
     import uvicorn
+
+    os.environ.update(FAKE_LMS_USER=LMS_USER, FAKE_LMS_PASSWORD=LMS_PASSWORD, FAKE_LMS_TOKEN=LMS_TOKEN)
 
     port = _free_port()
     server = uvicorn.Server(uvicorn.Config("e2e.fake_lms.app:app", host="127.0.0.1", port=port, log_level="warning"))
@@ -35,9 +44,13 @@ def lms():
     thread.join(timeout=5)
 
 
+def _req(url: str, method: str = "GET") -> urllib.request.Request:
+    return urllib.request.Request(url, method=method, headers={"X-LMS-Token": LMS_TOKEN})
+
+
 def stats(base: str) -> dict:
-    return json.loads(urllib.request.urlopen(base + "/_stats").read())
+    return json.loads(urllib.request.urlopen(_req(base + "/_stats")).read())
 
 
 def reset(base: str) -> None:
-    urllib.request.urlopen(urllib.request.Request(base + "/_reset", method="POST"))
+    urllib.request.urlopen(_req(base + "/_reset", "POST"))

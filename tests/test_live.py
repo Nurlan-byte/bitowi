@@ -4,6 +4,8 @@ Spends subscriptions — run only by hand on the server:  pytest -m live -s
 """
 
 import os
+import secrets
+import shutil
 
 import pytest
 
@@ -16,7 +18,7 @@ from app.browser.sites import profile_for
 from app.config import Settings
 from app.db import Database
 from app.orchestrator import Orchestrator, State
-from tests.lms_server import lms, reset, stats  # noqa: F401
+from tests.lms_server import LMS_PASSWORD, LMS_USER, lms, reset, stats  # noqa: F401
 from tests.test_browser_flow import settle
 
 pytestmark = pytest.mark.live
@@ -30,10 +32,13 @@ def live_settings(tmp_path, lms):
     return Settings(
         _env_file=None,
         data_dir=tmp_path / "data",
-        tasks_dir=tmp_path / "tasks",
         prompts_dir=os.environ.get("PROMPTS_DIR", "~/bitowi_instructions/prompts"),
         fake_lms_host=lms.split("://", 1)[1],
+        fake_lms_user=LMS_USER,
+        fake_lms_password=LMS_PASSWORD,
         max_rounds=2,
+        worker_mode=os.environ.get("WORKER_MODE", "local"),
+        tasks_dir=os.environ.get("TASKS_DIR", str(tmp_path / "tasks")),
     )
 
 
@@ -73,6 +78,10 @@ async def test_live_full_pipeline(live_settings, lms):
 
     db = Database(live_settings.db_path)
     await db.connect()
+    # TASKS_DIR может быть общим с ботом (/srv/bitowi/tasks) — номера задач теста далеко от боевых
+    base_id = 900000 + secrets.randbelow(90000)
+    await db.conn.execute("INSERT INTO sqlite_sequence (name, seq) VALUES ('tasks', ?)", (base_id,))
+    await db.conn.commit()
     host = lms.split("://", 1)[1]
     await db.set_domain(host, "approved")
     orch = Orchestrator(
@@ -82,6 +91,7 @@ async def test_live_full_pipeline(live_settings, lms):
     task = await orch.submit_url(lms + "/quiz/1")
     task = await settle(orch, task.id, (State.AWAIT_CONFIRM, State.FAILED, State.PAUSED), tries=2000)
     await db.close()
+    shutil.rmtree(live_settings.tasks_dir / str(task.id), ignore_errors=True)
     assert task.state == State.AWAIT_CONFIRM, task.error
     answers = dict(line.split(":", 1) for line in task.final_answer.splitlines())
     assert answers["1"].strip() == "2"

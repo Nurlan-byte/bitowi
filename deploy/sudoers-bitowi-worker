@@ -1,0 +1,5 @@
+# bitowi: бот (nurlan) запускает исполнителя только через обёртку и только от bitowi-worker.
+# Проверка: visudo -cf deploy/sudoers-bitowi-worker
+# Установка: install -o root -g root -m 440 deploy/sudoers-bitowi-worker /etc/sudoers.d/bitowi-worker
+Defaults!/usr/local/bin/bitowi-worker-run !use_pty, env_reset, !lecture
+nurlan ALL=(bitowi-worker) NOPASSWD: /usr/local/bin/bitowi-worker-run

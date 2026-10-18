@@ -16,7 +16,9 @@ from app.orchestrator import Orchestrator, State
 
 log = logging.getLogger(__name__)
 
-URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
+# без кавычек и скобок вокруг ссылки и без точки/запятой в конце
+URL_RE = re.compile(r"https?://[^\s\"'<>«»()\[\]]+(?<![.,;:!?])", re.IGNORECASE)
+BARE_REST = re.compile(r"[\s\"'<>«»()\[\].,;:!?]+")
 FIX_MARK = re.compile(r"Исправить задачу #(\d+)")
 
 STATE_RU = {
@@ -118,6 +120,67 @@ def build_router(orch: Orchestrator, owner_id: int) -> Router:
             path.chmod(0o600)
         await message.answer(f"Сохранил вход для {host} ({len(state['cookies'])} cookies). Продолжить — /resume")
 
+    @owner.message(Command("status"))
+    async def cmd_status(message: Message) -> None:
+        task = await orch.active_task()
+        queued = await orch.queued()
+        if not task:
+            await message.answer("Сейчас задач нет." + (f" В очереди: {len(queued)}." if queued else ""))
+            return
+        text = (
+            f"Задача #{task.id}: {STATE_RU.get(task.state, task.state)}\n"
+            f"Раунд {task.round}/{orch.settings.max_rounds}"
+        )
+        if queued:
+            text += f"\nВ очереди: {len(queued)}"
+        await message.answer(text)
+
+    @owner.message(Command("stop"))
+    async def cmd_stop(message: Message) -> None:
+        task = await orch.cancel()
+        if not task:
+            await message.answer("Нечего отменять.")
+
+    @owner.message(Command("resume"))
+    async def cmd_resume(message: Message) -> None:
+        task = await orch.resume()
+        await message.answer(f"Продолжаю задачу #{task.id}." if task else "Задач на паузе нет.")
+
+    @owner.message(Command("history"))
+    async def cmd_history(message: Message) -> None:
+        tasks = await orch.db.last_tasks(10)
+        if not tasks:
+            await message.answer("История пуста.")
+            return
+        lines = []
+        for t in tasks:
+            head = t.input.replace("\n", " ")[:50]
+            tail = t.final_answer or t.error or ""
+            lines.append(f"#{t.id} · {STATE_RU.get(t.state, t.state)} · {head}" + (f" → {tail[:60]}" if tail else ""))
+        await message.answer(clip("\n".join(lines)))
+
+    @owner.callback_query(TaskAction.filter())
+    async def on_action(query: CallbackQuery, callback_data: TaskAction) -> None:
+        tid = callback_data.task_id
+        if callback_data.action == "submit":
+            ok = await orch.confirm(tid)
+            await query.answer("Принято" if ok else "Задача уже не ждёт подтверждения")
+        elif callback_data.action == "fix":
+            task = await orch.db.get_task(tid)
+            if not task or task.state != State.AWAIT_CONFIRM:
+                await query.answer("Задача уже не ждёт подтверждения")
+                return
+            await query.answer()
+            await query.message.answer(
+                f"Исправить задачу #{tid}: напиши ответом на это сообщение, что поправить.",
+                reply_markup=ForceReply(selective=True),
+            )
+        elif callback_data.action == "cancel":
+            task = await orch.cancel(tid)
+            await query.answer("Отменено" if task else "Задача уже завершена")
+        if query.message and callback_data.action in ("submit", "cancel"):
+            await query.message.edit_reply_markup(reply_markup=None)
+
     @owner.message(F.reply_to_message & F.text)
     async def on_reply(message: Message, bot: Bot) -> None:
         replied = message.reply_to_message
@@ -133,9 +196,13 @@ def build_router(orch: Orchestrator, owner_id: int) -> Router:
 
     @owner.message(F.text)
     async def on_text(message: Message) -> None:
+        # задачей становится только сообщение-ссылка; ссылка внутри текста — через /task
         m = URL_RE.search(message.text)
-        if m:
+        rest = (message.text[: m.start()] + message.text[m.end():]) if m else ""
+        if m and not BARE_REST.sub("", rest):
             await start_url(message, m.group(0))
+        elif m:
+            await message.answer("Задачу по ссылке создаю из сообщения, где только ссылка, или: /task <url>")
         else:
             await message.answer(HELP)
 

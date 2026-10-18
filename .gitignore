@@ -1,0 +1,21 @@
+# секреты и данные
+.env
+data/
+tasks/
+state.json
+*.png
+*.db
+
+# инструкции для ИИ — хранятся вне репозитория
+CLAUDE.md
+CLAUDE.local.md
+.claude/
+PLAN.md
+KICKOFF.md
+AGENTS.md
+
+# Python
+__pycache__/
+.venv/
+venv/
+.pytest_cache/

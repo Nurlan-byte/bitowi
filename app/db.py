@@ -1,4 +1,4 @@
-"""SQLite storage for tasks and events. The tasks table doubles as the queue."""
+"""SQLite storage for tasks, events and domains. The tasks table doubles as the queue."""
 
 import json
 from dataclasses import dataclass
@@ -30,10 +30,24 @@ CREATE TABLE IF NOT EXISTS events (
     kind TEXT NOT NULL,
     payload TEXT
 );
+CREATE TABLE IF NOT EXISTS domains (
+    domain TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    verdict TEXT,
+    summary TEXT,
+    sources TEXT,
+    updated_at TEXT NOT NULL
+);
 """
 
+# колонки, добавленные после этапа 1: (имя, определение)
+MIGRATIONS = [
+    ("parent_id", "INTEGER"),
+    ("part", "TEXT"),
+]
+
 TASK_FIELDS = {
-    "state", "round", "retries", "final_answer", "error", "resume_state", "status_msg_id",
+    "state", "round", "retries", "final_answer", "error", "resume_state", "status_msg_id", "part",
 }
 
 
@@ -55,6 +69,22 @@ class Task:
     status_msg_id: int | None
     created_at: str
     updated_at: str
+    parent_id: int | None = None
+    part: str | None = None
+
+
+@dataclass
+class Domain:
+    domain: str
+    status: str  # pending | approved | rejected
+    verdict: str | None
+    summary: str | None
+    sources: str | None
+    updated_at: str
+
+    @property
+    def source_list(self) -> list[str]:
+        return json.loads(self.sources) if self.sources else []
 
 
 class Database:
@@ -67,7 +97,15 @@ class Database:
         self._conn = await aiosqlite.connect(self.path)
         self._conn.row_factory = aiosqlite.Row
         await self._conn.executescript(SCHEMA)
+        await self._migrate()
         await self._conn.commit()
+
+    async def _migrate(self) -> None:
+        async with self.conn.execute("PRAGMA table_info(tasks)") as cur:
+            existing = {row["name"] for row in await cur.fetchall()}
+        for name, ddl in MIGRATIONS:
+            if name not in existing:
+                await self.conn.execute(f"ALTER TABLE tasks ADD COLUMN {name} {ddl}")
 
     async def close(self) -> None:
         if self._conn:
@@ -79,11 +117,14 @@ class Database:
         assert self._conn is not None, "Database is not connected"
         return self._conn
 
-    async def create_task(self, kind: str, text: str, state: str) -> Task:
+    async def create_task(
+        self, kind: str, text: str, state: str, parent_id: int | None = None, part: str | None = None
+    ) -> Task:
         now = _now()
         cur = await self.conn.execute(
-            "INSERT INTO tasks (kind, input, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-            (kind, text, state, now, now),
+            "INSERT INTO tasks (kind, input, state, parent_id, part, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (kind, text, state, parent_id, part, now, now),
         )
         await self.conn.commit()
         task = await self.get_task(cur.lastrowid)
@@ -131,3 +172,35 @@ class Database:
             (task_id, _now(), kind, data),
         )
         await self.conn.commit()
+
+    async def get_domain(self, domain: str) -> Domain | None:
+        async with self.conn.execute("SELECT * FROM domains WHERE domain = ?", (domain,)) as cur:
+            row = await cur.fetchone()
+        return Domain(**dict(row)) if row else None
+
+    async def set_domain(
+        self,
+        domain: str,
+        status: str,
+        verdict: str | None = None,
+        summary: str | None = None,
+        sources: list[str] | None = None,
+    ) -> Domain:
+        current = await self.get_domain(domain)
+        if current and verdict is None:
+            verdict, summary = current.verdict, current.summary
+            sources = current.source_list if sources is None else sources
+        await self.conn.execute(
+            "INSERT OR REPLACE INTO domains (domain, status, verdict, summary, sources, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (domain, status, verdict, summary, json.dumps(sources or [], ensure_ascii=False), _now()),
+        )
+        await self.conn.commit()
+        result = await self.get_domain(domain)
+        assert result is not None
+        return result
+
+    async def list_domains(self) -> list[Domain]:
+        async with self.conn.execute("SELECT * FROM domains ORDER BY domain") as cur:
+            rows = await cur.fetchall()
+        return [Domain(**dict(r)) for r in rows]

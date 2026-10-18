@@ -1,6 +1,7 @@
 """Agent interfaces and shared models. Boss and worker are swappable behind these ABCs."""
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -23,11 +24,59 @@ class BossBadJSON(AgentError):
     """Boss returned invalid JSON twice in a row."""
 
 
+class QuestionVerdict(BaseModel):
+    n: int
+    ok: bool
+    comment: str = ""
+    answer: str = ""
+
+
 class ReviewResult(BaseModel):
     verdict: Literal["accept", "revise"]
+    questions: list[QuestionVerdict] = []
     comment_for_worker: str = ""
     final_answer: str = ""
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+
+
+class Question(BaseModel):
+    n: int
+    text: str
+    answer_type: Literal["single_choice", "multi_choice", "text", "number", "code", "file"] = "text"
+    options: list[str] = []
+    answer_format: str = ""
+    # только для boss_private.json — воркеру не передаются
+    already_answered: bool = False
+    previous_answer: str | None = None
+    visible_correct_answer: str | None = None
+    locator_notes: str = ""
+
+
+class ExtractResult(BaseModel):
+    status: Literal["ok", "login_required", "no_task", "error"] = "ok"
+    error: str = ""
+    platform: str = ""
+    page_title: str = ""
+    attempt_url: str = ""
+    attempts_left: int | None = None
+    questions: list[Question] = []
+    private_notes: str = ""
+
+
+class PolicyResult(BaseModel):
+    verdict: Literal["allowed", "forbidden", "unclear"]
+    summary: str
+    sources: list[str] = []
+
+
+@dataclass(frozen=True)
+class BrowserOpts:
+    """How the boss's browser is launched for one call."""
+
+    storage_state: Path | None
+    output_dir: Path
+    # блокировка кнопок сдачи: True только на шаге извлечения, при сдаче (этап 3) — False
+    guard: bool
 
 
 class Worker(ABC):
@@ -41,10 +90,15 @@ class Boss(ABC):
     async def review(
         self, task_dir: Path, notebook_text: str, private: dict[str, Any], round_no: int, max_rounds: int
     ) -> ReviewResult:
-        """Check the last executor reply against the task."""
+        """Check the executor's answers against the task, question by question."""
 
-    async def extract(self, task_dir: Path, url: str) -> dict[str, Any]:
-        raise NotImplementedError("Извлечение из браузера — этап 2")
+    async def check_policy(self, task_dir: Path, url: str, browser: BrowserOpts) -> PolicyResult:
+        raise NotImplementedError
 
-    async def submit(self, task_dir: Path, private: dict[str, Any], final_answer: str) -> dict[str, Any]:
+    async def extract(self, task_dir: Path, url: str, browser: BrowserOpts) -> ExtractResult:
+        raise NotImplementedError
+
+    async def submit(
+        self, task_dir: Path, private: dict[str, Any], answers: dict[int, str], browser: BrowserOpts
+    ) -> dict[str, Any]:
         raise NotImplementedError("Сдача на платформе — этап 3")

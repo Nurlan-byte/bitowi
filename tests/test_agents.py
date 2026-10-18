@@ -138,3 +138,58 @@ async def test_runner_stdin_and_output(tmp_path):
 def test_looks_like_limit():
     assert runner.looks_like_limit("Error 429 Too Many Requests")
     assert not runner.looks_like_limit("ответ: 391")
+
+
+# --- этап 2: браузер куратора ---
+from app.agents.base import BrowserOpts, ExtractResult  # noqa: E402
+
+
+def test_boss_review_has_no_browser(settings, tmp_path):
+    cmd = CodexBoss(settings).build_command(tmp_path)
+    assert 'web_search="disabled"' in cmd
+    assert not any("mcp_servers" in c for c in cmd)
+
+
+def test_boss_browser_extract_mode_has_guard(settings, tmp_path):
+    opts = BrowserOpts(storage_state=tmp_path / "auth.json", output_dir=tmp_path / "screens", guard=True)
+    cmd = CodexBoss(settings).build_command(tmp_path, opts)
+    joined = " ".join(cmd)
+    assert 'default_tools_approval_mode="approve"' in joined
+    args = json.loads(next(c for c in cmd if c.startswith("mcp_servers.playwright.args=")).split("=", 1)[1])
+    assert "--isolated" in args and "--headless" in args
+    assert args[args.index("--storage-state") + 1] == str(tmp_path / "auth.json")
+    assert args[args.index("--init-script") + 1].endswith("guard.js")
+
+
+def test_boss_browser_submit_mode_has_no_guard(settings, tmp_path):
+    # этап 3: при сдаче блокировка кнопок отключается
+    opts = BrowserOpts(storage_state=None, output_dir=tmp_path, guard=False)
+    args = CodexBoss(settings).mcp_args(opts)
+    assert "--init-script" not in args and "--storage-state" not in args
+
+
+async def test_boss_extract_refuses_without_guard(settings, tmp_path):
+    boss = _boss_with(['{"status": "ok"}'], settings, [])
+    with pytest.raises(AssertionError):
+        await boss.extract(tmp_path, "http://x", BrowserOpts(None, tmp_path, guard=False))
+
+
+async def test_boss_extract_parses(settings, tmp_path):
+    calls = []
+    raw = json.dumps({
+        "status": "ok", "platform": "Moodle",
+        "questions": [{"n": 1, "text": "2+2?", "answer_type": "number"}],
+    })
+    boss = _boss_with([raw], settings, calls)
+    res = await boss.extract(tmp_path, "http://x/q", BrowserOpts(None, tmp_path / "s", guard=True))
+    assert isinstance(res, ExtractResult) and res.questions[0].text == "2+2?"
+    assert "http://x/q" in calls[0] and str(tmp_path / "s") in calls[0]
+
+
+def test_worker_denies_project_and_boss_files(settings):
+    data = json.loads(ClaudeWorker(settings).sandbox_settings())
+    deny = data["permissions"]["deny"]
+    assert any(str(settings.data_dir.as_posix()) in d for d in deny)
+    assert any(Path(__file__).resolve().parents[1].as_posix() in d for d in deny)
+    assert data["sandbox"]["allowUnsandboxedCommands"] is False
+    assert data["sandbox"]["enabled"] is settings.worker_sandbox

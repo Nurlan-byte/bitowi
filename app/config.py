@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     # Подтверждение перед сдачей отключается только явным AUTO_SUBMIT=true в .env
     auto_submit: bool = False
     worker_web: bool = False
+    # песочница bubblewrap для воркера (Linux). На Ubuntu 26.04 AppArmor (bwrap-userns-restrict)
+    # не даёт ей стартовать — включать только после решения владельца по AppArmor
+    worker_sandbox: bool = False
 
     data_dir: Path = Path("./data")
     tasks_dir: Path = Path("~/bitowi_data/tasks")
@@ -28,6 +31,19 @@ class Settings(BaseSettings):
 
     claude_bin: str = "claude"
     codex_bin: str = "codex"
+    playwright_mcp_bin: str = "playwright-mcp"
+
+    # браузер
+    browser_timeout: int = 45
+    max_questions: int = 15
+
+    # вход по форме (пароли модели не передаются — вход делает оркестратор)
+    demo_moodle_host: str = "school.moodledemo.net"
+    demo_moodle_user: str = ""
+    demo_moodle_password: str = ""
+    fake_lms_host: str = "127.0.0.1:8765"
+    fake_lms_user: str = "student"
+    fake_lms_password: str = "student"
 
     @field_validator("data_dir", "tasks_dir", "prompts_dir", mode="after")
     @classmethod
@@ -42,6 +58,14 @@ class Settings(BaseSettings):
     @property
     def db_path(self) -> Path:
         return self.data_dir / "bitowi.db"
+
+    @property
+    def auth_dir(self) -> Path:
+        return self.data_dir / "auth"
+
+    @property
+    def boss_root(self) -> Path:
+        return self.data_dir / "boss"
 
     def prompt(self, name: str) -> str:
         """Read a system prompt template from PROMPTS_DIR."""

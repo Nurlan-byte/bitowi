@@ -10,7 +10,9 @@ from app.config import Settings
 
 log = logging.getLogger(__name__)
 
-ALLOWED_TOOLS = "Read,Write,Edit,Bash(python3:*)"
+PROJECT_DIR = Path(__file__).resolve().parents[2]
+
+ALLOWED_TOOLS ="Read,Write,Edit,Bash(python3:*)"
 WEB_TOOLS = "WebSearch,WebFetch"
 
 PROMPT_HEADER = (
@@ -23,6 +25,25 @@ class ClaudeWorker(Worker):
     def __init__(self, settings: Settings, run=runner.run) -> None:
         self.settings = settings
         self._run = run
+
+    def denied_paths(self) -> list[Path]:
+        """Directories the worker must not read: code, instructions, boss files, CLI logins."""
+        s = self.settings
+        return [PROJECT_DIR, s.prompts_dir.parent, s.data_dir, Path.home() / ".codex"]
+
+    def sandbox_settings(self) -> str:
+        deny = []
+        for path in self.denied_paths():
+            p = path.resolve().as_posix()
+            deny += [f"Read(/{p}/**)", f"Edit(/{p}/**)"]
+        return json.dumps({
+            "sandbox": {
+                "enabled": self.settings.worker_sandbox,
+                "autoAllowBashIfSandboxed": True,
+                "allowUnsandboxedCommands": False,
+            },
+            "permissions": {"deny": deny},
+        })
 
     def build_command(self) -> list[str]:
         allowed = ALLOWED_TOOLS + ("," + WEB_TOOLS if self.settings.worker_web else "")
@@ -37,6 +58,7 @@ class ClaudeWorker(Worker):
             "--strict-mcp-config",
             "--max-turns", "20",
             "--no-session-persistence",
+            "--settings", self.sandbox_settings(),
         ]
 
     async def solve(self, notebook_text: str, workspace: Path) -> str:

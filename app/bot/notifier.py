@@ -1,16 +1,21 @@
 """Telegram implementation of the orchestrator Notifier."""
 
 import logging
+from pathlib import Path
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest
+from aiogram.types import FSInputFile
 
-from app.bot.keyboards import preview_kb
+from app.agents.base import PolicyResult
+from app.bot.keyboards import domain_kb, preview_kb
 from app.db import Database, Task
 
 log = logging.getLogger(__name__)
 
 LIMIT = 4096
+
+POLICY_RU = {"allowed": "разрешено", "forbidden": "запрещено", "unclear": "неясно"}
 
 
 def clip(text: str, limit: int = LIMIT) -> str:
@@ -44,3 +49,20 @@ class TelegramNotifier:
 
     async def message(self, task: Task, text: str) -> None:
         await self.bot.send_message(self.chat_id, clip(text))
+
+    async def photo(self, task: Task, path: Path, caption: str) -> None:
+        try:
+            await self.bot.send_photo(self.chat_id, FSInputFile(path), caption=clip(caption, 1000))
+        except TelegramBadRequest:
+            # слишком длинная страница для фото — шлём файлом
+            await self.bot.send_document(self.chat_id, FSInputFile(path), caption=clip(caption, 1000))
+
+    async def domain_request(self, task: Task, host: str, policy: PolicyResult) -> None:
+        verdict = POLICY_RU.get(policy.verdict, policy.verdict)
+        sources = "\n".join(f"• {s}" for s in policy.sources[:8]) or "• не найдены"
+        text = (
+            f"Задача #{task.id}: новый домен {host}\n\n"
+            f"Правила об ИИ: {verdict}\n{policy.summary}\n\nИсточники:\n{sources}\n\n"
+            "Разрешить работу на этом домене?"
+        )
+        await self.bot.send_message(self.chat_id, clip(text), reply_markup=domain_kb(task.id))

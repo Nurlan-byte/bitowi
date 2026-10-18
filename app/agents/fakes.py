@@ -5,7 +5,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from app.agents.base import Boss, ReviewResult, Worker
+from app.agents.base import Boss, BrowserOpts, ExtractResult, PolicyResult, QuestionVerdict, ReviewResult, Worker
 
 Step = str | BaseException | ReviewResult
 
@@ -33,27 +33,60 @@ class FakeWorker(Worker):
 
 
 class FakeBoss(Boss):
-    """Returns scripted verdicts: "accept", "revise", a ReviewResult or an exception."""
+    """Scripted boss.
 
-    def __init__(self, verdicts: Iterable[Step] = ()) -> None:
+    verdicts: "accept", "revise", "revise:2,3" (only these questions wrong), a ReviewResult or an exception.
+    """
+
+    def __init__(
+        self,
+        verdicts: Iterable[Step] = (),
+        extracts: Iterable[ExtractResult | BaseException] = (),
+        policies: Iterable[PolicyResult | BaseException] = (),
+    ) -> None:
         self.verdicts = list(verdicts)
+        self.extracts = list(extracts)
+        self.policies = list(policies)
         self.calls: list[dict[str, Any]] = []
+        self.browser_calls: list[tuple[str, BrowserOpts]] = []
 
     async def review(
         self, task_dir: Path, notebook_text: str, private: dict[str, Any], round_no: int, max_rounds: int
     ) -> ReviewResult:
-        self.calls.append({"notebook": notebook_text, "round": round_no, "max_rounds": max_rounds})
+        self.calls.append({"notebook": notebook_text, "round": round_no, "max_rounds": max_rounds, "private": private})
         step = _next(self.verdicts, "accept")
         if isinstance(step, BaseException):
             raise step
         if isinstance(step, ReviewResult):
             return step
+        under_review = private.get("under_review", [1])
         if step == "accept":
-            return ReviewResult(verdict="accept", final_answer=_last_answer(notebook_text), confidence=0.9)
+            return ReviewResult(
+                verdict="accept",
+                questions=[QuestionVerdict(n=n, ok=True) for n in under_review],
+                confidence=0.9,
+            )
+        if step.startswith("revise:"):
+            wrong = {int(x) for x in step.split(":", 1)[1].split(",")}
+            return ReviewResult(
+                verdict="revise",
+                questions=[
+                    QuestionVerdict(n=n, ok=n not in wrong, comment="" if n not in wrong else f"Вопрос {n}: проверь ещё раз.")
+                    for n in under_review
+                ],
+            )
         return ReviewResult(verdict="revise", comment_for_worker=f"Перепроверь расчёт (раунд {round_no}).")
 
+    async def check_policy(self, task_dir: Path, url: str, browser: BrowserOpts) -> PolicyResult:
+        self.browser_calls.append(("policy", browser))
+        step = _next(self.policies, PolicyResult(verdict="allowed", summary="Правила разрешают помощников.", sources=[url]))
+        if isinstance(step, BaseException):
+            raise step
+        return step
 
-def _last_answer(notebook_text: str) -> str:
-    from app.notebook import extract_answer
-
-    return extract_answer(notebook_text.rsplit("**Исполнитель:**", 1)[-1])
+    async def extract(self, task_dir: Path, url: str, browser: BrowserOpts) -> ExtractResult:
+        self.browser_calls.append(("extract", browser))
+        step = _next(self.extracts, ExtractResult(status="no_task"))
+        if isinstance(step, BaseException):
+            raise step
+        return step

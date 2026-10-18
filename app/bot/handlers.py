@@ -1,14 +1,17 @@
 """Telegram commands, buttons and replies."""
 
+import json
 import logging
+import os
 import re
 
 from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import CallbackQuery, ForceReply, Message
 
-from app.bot.keyboards import TaskAction
+from app.bot.keyboards import DomainAction, TaskAction
 from app.bot.notifier import clip
+from app.browser.sites import auth_file, host_of
 from app.orchestrator import Orchestrator, State
 
 log = logging.getLogger(__name__)
@@ -19,6 +22,8 @@ FIX_MARK = re.compile(r"Исправить задачу #(\d+)")
 STATE_RU = {
     State.QUEUED: "в очереди",
     State.EXTRACTING: "извлечение задания",
+    State.CHECKING_POLICY: "проверка правил домена",
+    State.AWAIT_DOMAIN: "ждёт решения по домену",
     State.SOLVING: "исполнитель решает",
     State.REVIEWING: "куратор проверяет",
     State.AWAIT_CONFIRM: "ждёт подтверждения",
@@ -29,9 +34,13 @@ STATE_RU = {
     State.CANCELLED: "отменена",
 }
 
+DOMAIN_RU = {"approved": "разрешён", "rejected": "запрещён", "pending": "ждёт решения"}
+
 HELP = (
     "Команды:\n"
+    "ссылка или /task <url> — задача со страницы\n"
     "/text <задание> — новая задача текстом\n"
+    "/domains — домены и решения по ним\n"
     "/status — текущая задача\n"
     "/stop — отменить текущую задачу\n"
     "/resume — продолжить после паузы\n"
@@ -72,9 +81,68 @@ def build_router(orch: Orchestrator, owner_id: int) -> Router:
         if task.state == State.QUEUED:
             await message.answer(f"Задача #{task.id} в очереди — сейчас выполняется другая.")
 
+    async def start_url(message: Message, url: str) -> None:
+        host = host_of(url)
+        domain = await orch.db.get_domain(host)
+        if domain and domain.status == "rejected":
+            await message.answer(f"Домен {host} запрещён. Задачу не создаю.")
+            return
+        task = await orch.submit_url(url)
+        if task.state == State.QUEUED:
+            await message.answer(f"Задача #{task.id} в очереди — сейчас выполняется другая.")
+
     @owner.message(Command("task"))
-    async def cmd_task(message: Message) -> None:
-        await message.answer("Задачи по ссылке пока не поддерживаются. Пришли текст через /text.")
+    async def cmd_task(message: Message, command: CommandObject) -> None:
+        m = URL_RE.search(command.args or "")
+        if not m:
+            await message.answer("Пришли ссылку: /task <url>")
+            return
+        await start_url(message, m.group(0))
+
+    @owner.message(Command("domains"))
+    async def cmd_domains(message: Message) -> None:
+        domains = await orch.db.list_domains()
+        if not domains:
+            await message.answer("Доменов пока нет.")
+            return
+        lines = [f"{d.domain} · {DOMAIN_RU.get(d.status, d.status)} · правила: {d.verdict or '—'}" for d in domains]
+        await message.answer(clip("\n".join(lines)))
+
+    @owner.message(F.document)
+    async def on_document(message: Message, bot: Bot) -> None:
+        """state.json from the owner: login session for a host."""
+        doc = message.document
+        if not (doc.file_name or "").endswith(".json") or (doc.file_size or 0) > 2_000_000:
+            await message.answer("Жду state.json (до 2 МБ).")
+            return
+        host = (message.caption or "").strip().lower()
+        if not host:
+            paused = await orch.db.tasks_in_states((State.PAUSED,))
+            private = orch.load_private(paused[0].id) if paused else {}
+            host = private.get("host", "")
+        if not host:
+            await message.answer("Укажи домен в подписи к файлу, например: learn.astanait.edu.kz")
+            return
+        data = await bot.download(doc)
+        try:
+            state = json.loads(data.read().decode("utf-8"))
+            assert isinstance(state.get("cookies"), list)
+        except Exception:  # noqa: BLE001
+            await message.answer("Это не state.json Playwright (нет cookies).")
+            return
+        path = auth_file(orch.settings, host)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+        if os.name != "nt":
+            path.chmod(0o600)
+        await message.answer(f"Сохранил вход для {host} ({len(state['cookies'])} cookies). Продолжить — /resume")
+
+    @owner.callback_query(DomainAction.filter())
+    async def on_domain(query: CallbackQuery, callback_data: DomainAction) -> None:
+        ok = await orch.decide_domain(callback_data.task_id, callback_data.allow)
+        await query.answer(("Разрешено" if callback_data.allow else "Запрещено") if ok else "Задача уже не ждёт решения")
+        if query.message:
+            await query.message.edit_reply_markup(reply_markup=None)
 
     @owner.message(Command("status"))
     async def cmd_status(message: Message) -> None:
@@ -152,8 +220,9 @@ def build_router(orch: Orchestrator, owner_id: int) -> Router:
 
     @owner.message(F.text)
     async def on_text(message: Message) -> None:
-        if URL_RE.search(message.text):
-            await message.answer("Задачи по ссылке пока не поддерживаются. Пришли текст через /text.")
+        m = URL_RE.search(message.text)
+        if m:
+            await start_url(message, m.group(0))
         else:
             await message.answer(HELP)
 

@@ -9,9 +9,9 @@ from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import CallbackQuery, ForceReply, Message
 
-from app.bot.keyboards import DomainAction, TaskAction
+from app.bot.keyboards import TaskAction
 from app.bot.notifier import clip
-from app.browser.sites import auth_file, host_of
+from app.browser.sites import auth_file
 from app.orchestrator import Orchestrator, State
 
 log = logging.getLogger(__name__)
@@ -22,8 +22,6 @@ FIX_MARK = re.compile(r"Исправить задачу #(\d+)")
 STATE_RU = {
     State.QUEUED: "в очереди",
     State.EXTRACTING: "извлечение задания",
-    State.CHECKING_POLICY: "проверка правил домена",
-    State.AWAIT_DOMAIN: "ждёт решения по домену",
     State.SOLVING: "исполнитель решает",
     State.REVIEWING: "куратор проверяет",
     State.AWAIT_CONFIRM: "ждёт подтверждения",
@@ -34,13 +32,10 @@ STATE_RU = {
     State.CANCELLED: "отменена",
 }
 
-DOMAIN_RU = {"approved": "разрешён", "rejected": "запрещён", "pending": "ждёт решения"}
-
 HELP = (
     "Команды:\n"
     "ссылка или /task <url> — задача со страницы\n"
     "/text <задание> — новая задача текстом\n"
-    "/domains — домены и решения по ним\n"
     "/status — текущая задача\n"
     "/stop — отменить текущую задачу\n"
     "/resume — продолжить после паузы\n"
@@ -82,11 +77,6 @@ def build_router(orch: Orchestrator, owner_id: int) -> Router:
             await message.answer(f"Задача #{task.id} в очереди — сейчас выполняется другая.")
 
     async def start_url(message: Message, url: str) -> None:
-        host = host_of(url)
-        domain = await orch.db.get_domain(host)
-        if domain and domain.status == "rejected":
-            await message.answer(f"Домен {host} запрещён. Задачу не создаю.")
-            return
         task = await orch.submit_url(url)
         if task.state == State.QUEUED:
             await message.answer(f"Задача #{task.id} в очереди — сейчас выполняется другая.")
@@ -98,15 +88,6 @@ def build_router(orch: Orchestrator, owner_id: int) -> Router:
             await message.answer("Пришли ссылку: /task <url>")
             return
         await start_url(message, m.group(0))
-
-    @owner.message(Command("domains"))
-    async def cmd_domains(message: Message) -> None:
-        domains = await orch.db.list_domains()
-        if not domains:
-            await message.answer("Доменов пока нет.")
-            return
-        lines = [f"{d.domain} · {DOMAIN_RU.get(d.status, d.status)} · правила: {d.verdict or '—'}" for d in domains]
-        await message.answer(clip("\n".join(lines)))
 
     @owner.message(F.document)
     async def on_document(message: Message, bot: Bot) -> None:
@@ -136,74 +117,6 @@ def build_router(orch: Orchestrator, owner_id: int) -> Router:
         if os.name != "nt":
             path.chmod(0o600)
         await message.answer(f"Сохранил вход для {host} ({len(state['cookies'])} cookies). Продолжить — /resume")
-
-    @owner.callback_query(DomainAction.filter())
-    async def on_domain(query: CallbackQuery, callback_data: DomainAction) -> None:
-        ok = await orch.decide_domain(callback_data.task_id, callback_data.allow)
-        await query.answer(("Разрешено" if callback_data.allow else "Запрещено") if ok else "Задача уже не ждёт решения")
-        if query.message:
-            await query.message.edit_reply_markup(reply_markup=None)
-
-    @owner.message(Command("status"))
-    async def cmd_status(message: Message) -> None:
-        task = await orch.active_task()
-        queued = await orch.queued()
-        if not task:
-            await message.answer("Сейчас задач нет." + (f" В очереди: {len(queued)}." if queued else ""))
-            return
-        text = (
-            f"Задача #{task.id}: {STATE_RU.get(task.state, task.state)}\n"
-            f"Раунд {task.round}/{orch.settings.max_rounds}"
-        )
-        if queued:
-            text += f"\nВ очереди: {len(queued)}"
-        await message.answer(text)
-
-    @owner.message(Command("stop"))
-    async def cmd_stop(message: Message) -> None:
-        task = await orch.cancel()
-        if not task:
-            await message.answer("Нечего отменять.")
-
-    @owner.message(Command("resume"))
-    async def cmd_resume(message: Message) -> None:
-        task = await orch.resume()
-        await message.answer(f"Продолжаю задачу #{task.id}." if task else "Задач на паузе нет.")
-
-    @owner.message(Command("history"))
-    async def cmd_history(message: Message) -> None:
-        tasks = await orch.db.last_tasks(10)
-        if not tasks:
-            await message.answer("История пуста.")
-            return
-        lines = []
-        for t in tasks:
-            head = t.input.replace("\n", " ")[:50]
-            tail = t.final_answer or t.error or ""
-            lines.append(f"#{t.id} · {STATE_RU.get(t.state, t.state)} · {head}" + (f" → {tail[:60]}" if tail else ""))
-        await message.answer(clip("\n".join(lines)))
-
-    @owner.callback_query(TaskAction.filter())
-    async def on_action(query: CallbackQuery, callback_data: TaskAction) -> None:
-        tid = callback_data.task_id
-        if callback_data.action == "submit":
-            ok = await orch.confirm(tid)
-            await query.answer("Принято" if ok else "Задача уже не ждёт подтверждения")
-        elif callback_data.action == "fix":
-            task = await orch.db.get_task(tid)
-            if not task or task.state != State.AWAIT_CONFIRM:
-                await query.answer("Задача уже не ждёт подтверждения")
-                return
-            await query.answer()
-            await query.message.answer(
-                f"Исправить задачу #{tid}: напиши ответом на это сообщение, что поправить.",
-                reply_markup=ForceReply(selective=True),
-            )
-        elif callback_data.action == "cancel":
-            task = await orch.cancel(tid)
-            await query.answer("Отменено" if task else "Задача уже завершена")
-        if query.message and callback_data.action in ("submit", "cancel"):
-            await query.message.edit_reply_markup(reply_markup=None)
 
     @owner.message(F.reply_to_message & F.text)
     async def on_reply(message: Message, bot: Bot) -> None:

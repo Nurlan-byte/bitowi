@@ -13,7 +13,6 @@ from app.agents.base import (
     AgentTimeout,
     Boss,
     BrowserOpts,
-    PolicyResult,
     Question,
     QuestionVerdict,
     Worker,
@@ -31,8 +30,6 @@ log = logging.getLogger(__name__)
 class State(StrEnum):
     QUEUED = "QUEUED"
     EXTRACTING = "EXTRACTING"
-    CHECKING_POLICY = "CHECKING_POLICY"
-    AWAIT_DOMAIN = "AWAIT_DOMAIN"
     SOLVING = "SOLVING"
     REVIEWING = "REVIEWING"
     AWAIT_CONFIRM = "AWAIT_CONFIRM"
@@ -45,11 +42,8 @@ class State(StrEnum):
 
 TERMINAL = (State.DONE, State.FAILED, State.CANCELLED)
 # задача в этих состояниях занимает слот: следующая из очереди не стартует
-BUSY = (
-    State.EXTRACTING, State.CHECKING_POLICY, State.AWAIT_DOMAIN, State.SOLVING, State.REVIEWING,
-    State.AWAIT_CONFIRM, State.SUBMITTING, State.PAUSED,
-)
-RUNNING = (State.EXTRACTING, State.CHECKING_POLICY, State.SOLVING, State.REVIEWING, State.SUBMITTING)
+BUSY = (State.EXTRACTING, State.SOLVING, State.REVIEWING, State.AWAIT_CONFIRM, State.SUBMITTING, State.PAUSED)
+RUNNING = (State.EXTRACTING, State.SOLVING, State.REVIEWING, State.SUBMITTING)
 
 
 class Notifier(Protocol):
@@ -57,7 +51,6 @@ class Notifier(Protocol):
     async def preview(self, task: Task, task_text: str, answer: str) -> None: ...
     async def message(self, task: Task, text: str) -> None: ...
     async def photo(self, task: Task, path: Path, caption: str) -> None: ...
-    async def domain_request(self, task: Task, host: str, policy: PolicyResult) -> None: ...
 
 
 class Sessions(Protocol):
@@ -180,22 +173,6 @@ class Orchestrator:
             await self.db.add_event(task.id, "owner_remark")
         return task
 
-    async def decide_domain(self, task_id: int, allow: bool) -> bool:
-        task = await self.db.get_task(task_id)
-        if not task or task.state != State.AWAIT_DOMAIN:
-            return False
-        host = self.load_private(task_id).get("host", "")
-        await self.db.set_domain(host, "approved" if allow else "rejected")
-        await self.db.add_event(task_id, "domain", {"host": host, "allow": allow})
-        if allow:
-            await self.db.update_task(task_id, state=State.EXTRACTING)
-            self._start(task_id)
-        else:
-            task = await self.db.update_task(task_id, state=State.CANCELLED, error="домен запрещён владельцем")
-            await self.notifier.status(task, f"Задача #{task_id} отменена: {host} запрещён.")
-            await self._kick()
-        return True
-
     async def cancel(self, task_id: int | None = None) -> Task | None:
         task = await self.db.get_task(task_id) if task_id else await self.active_task()
         if not task or task.state in TERMINAL:
@@ -316,9 +293,6 @@ class Orchestrator:
             if task.state == State.EXTRACTING:
                 if not await self._extract(task):
                     return
-            elif task.state == State.CHECKING_POLICY:
-                await self._check_policy(task)
-                return
             elif task.state == State.SOLVING:
                 await self.notifier.status(task, f"{self._title(task)} · раунд {task.round}/{max_rounds} · исполнитель решает")
                 await self._solve(task)
@@ -334,7 +308,7 @@ class Orchestrator:
     def _title(task: Task) -> str:
         return f"Задача #{task.id}" + (f" (часть {task.part})" if task.part else "")
 
-    # --- браузер: вход, правила, извлечение ---
+    # --- браузер: вход и извлечение ---
     async def _session(self, task: Task) -> Path | None:
         if not self.sessions:
             raise RuntimeError("браузер не настроен")
@@ -342,29 +316,15 @@ class Orchestrator:
         return await self.sessions.ensure_session(profile_for(url, self.settings), url)
 
     def _browser(self, task_id: int, storage: Path | None) -> BrowserOpts:
-        # guard=True: на извлечении и проверке правил кнопки сдачи заблокированы
+        # guard=True: на извлечении кнопки сдачи заблокированы
         return BrowserOpts(storage_state=storage, output_dir=self.boss_dir(task_id) / "screens", guard=True)
 
     async def _extract(self, task: Task) -> bool:
-        """EXTRACTING. Returns False when the task stops here (waiting or failed)."""
+        """EXTRACTING. Returns False when the task failed here."""
         private = self.load_private(task.id)
         url, host = private["url"], private["host"]
-        domain = await self.db.get_domain(host)
-        if domain and domain.status == "rejected":
-            await self._fail(task.id, f"домен {host} запрещён владельцем")
-            return False
         await self.notifier.status(task, f"Задача #{task.id} · открываю страницу")
         storage = await self._session(task)
-        if not domain or domain.status == "pending":
-            if domain and domain.verdict:
-                # правила уже проверяли — просто спрашиваем владельца снова
-                task = await self.db.update_task(task.id, state=State.AWAIT_DOMAIN)
-                policy = PolicyResult(verdict=domain.verdict, summary=domain.summary or "", sources=domain.source_list)
-                await self.notifier.domain_request(task, host, policy)
-                return False
-            await self.db.update_task(task.id, state=State.CHECKING_POLICY)
-            return True
-
         await self.notifier.status(task, f"Задача #{task.id} · куратор извлекает задание")
         result = await self.boss.extract(self.boss_dir(task.id), url, self._browser(task.id, storage))
         await self.db.add_event(task.id, "extract", {"status": result.status, "questions": len(result.questions)})
@@ -407,15 +367,6 @@ class Orchestrator:
         nums = [q.n for q in questions]
         self.save_answers(task_id, {"expected": nums, "pending": nums, "answers": {}})
         self._json(task_id, "worker_task.md").write_text(render_task(questions, part), encoding="utf-8")
-
-    async def _check_policy(self, task: Task) -> None:
-        private = self.load_private(task.id)
-        await self.notifier.status(task, f"Задача #{task.id} · куратор ищет правила об ИИ на {private['host']}")
-        storage = await self._session(task)
-        policy = await self.boss.check_policy(self.boss_dir(task.id), private["url"], self._browser(task.id, storage))
-        await self.db.set_domain(private["host"], "pending", policy.verdict, policy.summary, policy.sources)
-        task = await self.db.update_task(task.id, state=State.AWAIT_DOMAIN)
-        await self.notifier.domain_request(task, private["host"], policy)
 
     async def _send_screenshot(self, task: Task, url: str, storage: Path | None) -> None:
         path = self.boss_dir(task.id) / "screens" / "extract.png"

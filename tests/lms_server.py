@@ -35,7 +35,7 @@ def lms():
     base = f"http://127.0.0.1:{port}"
     for _ in range(100):
         try:
-            urllib.request.urlopen(base + "/rules", timeout=1)
+            urllib.request.urlopen(base + "/login", timeout=1)
             break
         except OSError:
             time.sleep(0.05)

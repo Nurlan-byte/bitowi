@@ -82,8 +82,6 @@ async def test_live_full_pipeline(live_settings, lms):
     base_id = 900000 + secrets.randbelow(90000)
     await db.conn.execute("INSERT INTO sqlite_sequence (name, seq) VALUES ('tasks', ?)", (base_id,))
     await db.conn.commit()
-    host = lms.split("://", 1)[1]
-    await db.set_domain(host, "approved")
     orch = Orchestrator(
         live_settings, db, CodexBoss(live_settings), ClaudeWorker(live_settings), FakeNotifier(),
         BrowserSessions(live_settings),

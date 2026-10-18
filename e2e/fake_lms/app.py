@@ -66,8 +66,8 @@ def page(title: str, body: str) -> HTMLResponse:
         f"""<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>{html.escape(title)}</title>
 <style>body{{font-family:sans-serif;max-width:760px;margin:24px auto}} .q{{border:1px solid #ccc;padding:12px;margin:12px 0}}
 .correct{{color:green}} .wrong{{color:#b00}}</style></head>
-<body><header><a href="/">Мини-LMS</a> · <a href="/rules">Правила</a></header><h1>{html.escape(title)}</h1>{body}
-<footer><hr><a href="/rules">Правила платформы и академической честности</a></footer></body></html>"""
+<body><header><a href="/">Мини-LMS</a></header><h1>{html.escape(title)}</h1>{body}
+</body></html>"""
     )
 
 
@@ -85,15 +85,6 @@ async def index(request: Request):
         return need_login(request)
     links = "".join(f'<li><a href="/quiz/{i}">{html.escape(q["title"])}</a></li>' for i, q in QUIZZES.items())
     return page("Мои курсы", f"<ul>{links}</ul>")
-
-
-@app.get("/rules")
-async def rules():
-    return page(
-        "Правила платформы",
-        "<p>Это учебный стенд. Использование ИИ-помощников и нейросетей при выполнении заданий "
-        "<b>разрешено</b>. Списывание у других студентов запрещено.</p>",
-    )
 
 
 @app.get("/login")

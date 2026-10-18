@@ -1,8 +1,8 @@
-"""URL tasks on fake agents: domain rules, extraction, isolation, parts, per-question review."""
+"""URL tasks on fake agents: extraction, isolation, parts, per-question review."""
 
 import asyncio
 
-from app.agents.base import ExtractResult, PolicyResult, Question
+from app.agents.base import ExtractResult, Question
 from app.agents.fakes import FakeBoss, FakeWorker
 from app.browser.session import SessionExpired
 from app.orchestrator import Orchestrator, State
@@ -49,62 +49,20 @@ async def settle(orch, task_id, until, tries=50):
     return await orch.db.get_task(task_id)
 
 
-async def test_new_domain_asks_owner_then_extracts(settings, db, notifier):
+async def test_url_goes_straight_to_extract(settings, db, notifier):
     boss = FakeBoss(["accept"], extracts=[extracted()])
     orch = make(settings, db, notifier, boss, FakeWorker([ANSWERS_3]))
     task = await orch.submit_url(URL)
-    task = await settle(orch, task.id, (State.AWAIT_DOMAIN,))
-    assert task.state == State.AWAIT_DOMAIN
-    assert notifier.domains == [(task.id, HOST, "allowed")]
-    assert (await db.get_domain(HOST)).status == "pending"
-
-    assert await orch.decide_domain(task.id, True)
     task = await settle(orch, task.id, (State.AWAIT_CONFIRM, State.FAILED))
     assert task.state == State.AWAIT_CONFIRM, task.error
-    assert (await db.get_domain(HOST)).status == "approved"
     assert task.final_answer == "1: 2\n2: 1, 3\n3: Астана"
     assert notifier.photos and notifier.photos[0].name == "extract.png"
-    # блокировка кнопок сдачи — на всех браузерных шагах этапа 2
-    assert [k for k, _ in boss.browser_calls] == ["policy", "extract"]
+    # единственный браузерный шаг — извлечение, с блокировкой кнопок сдачи
+    assert [k for k, _ in boss.browser_calls] == ["extract"]
     assert all(b.guard for _, b in boss.browser_calls)
 
 
-async def test_rejected_domain(settings, db, notifier):
-    orch = make(settings, db, notifier, FakeBoss(), FakeWorker())
-    task = await orch.submit_url(URL)
-    task = await settle(orch, task.id, (State.AWAIT_DOMAIN,))
-    await orch.decide_domain(task.id, False)
-    assert (await db.get_task(task.id)).state == State.CANCELLED
-    assert (await db.get_domain(HOST)).status == "rejected"
-
-    again = await orch.submit_url(URL + "/2")
-    again = await settle(orch, again.id, (State.FAILED,))
-    assert again.state == State.FAILED and "запрещён" in again.error
-
-
-async def test_approved_domain_skips_policy(settings, db, notifier):
-    await db.set_domain(HOST, "approved", "allowed", "ok", [])
-    boss = FakeBoss(["accept"], extracts=[extracted()])
-    orch = make(settings, db, notifier, boss, FakeWorker([ANSWERS_3]))
-    task = await orch.submit_url(URL)
-    task = await settle(orch, task.id, (State.AWAIT_CONFIRM, State.FAILED))
-    assert task.state == State.AWAIT_CONFIRM
-    assert [k for k, _ in boss.browser_calls] == ["extract"]
-
-
-async def test_pending_domain_with_verdict_asks_again_without_check(settings, db, notifier):
-    await db.set_domain(HOST, "pending", "unclear", "не нашёл правил", [])
-    boss = FakeBoss()
-    orch = make(settings, db, notifier, boss, FakeWorker())
-    task = await orch.submit_url(URL)
-    task = await settle(orch, task.id, (State.AWAIT_DOMAIN,))
-    assert task.state == State.AWAIT_DOMAIN
-    assert boss.browser_calls == []
-    assert notifier.domains[-1][2] == "unclear"
-
-
 async def test_worker_gets_only_condition(settings, db, notifier):
-    await db.set_domain(HOST, "approved")
     worker = FakeWorker([ANSWERS_3])
     orch = make(settings, db, notifier, FakeBoss(["accept"], extracts=[extracted()]), worker, FakeSessions())
     task = await orch.submit_url(URL)
@@ -124,7 +82,6 @@ async def test_worker_gets_only_condition(settings, db, notifier):
 
 
 async def test_session_expired_pauses_and_resumes(settings, db, notifier):
-    await db.set_domain(HOST, "approved")
     sessions = FakeSessions([SessionExpired(HOST, "сессия протухла")])
     boss = FakeBoss(["accept"], extracts=[extracted()])
     orch = make(settings, db, notifier, boss, FakeWorker([ANSWERS_3]), sessions)
@@ -139,7 +96,6 @@ async def test_session_expired_pauses_and_resumes(settings, db, notifier):
 
 
 async def test_boss_sees_login_page_pauses(settings, db, notifier):
-    await db.set_domain(HOST, "approved")
     boss = FakeBoss(extracts=[ExtractResult(status="login_required")])
     orch = make(settings, db, notifier, boss, FakeWorker())
     task = await orch.submit_url(URL)
@@ -149,7 +105,6 @@ async def test_boss_sees_login_page_pauses(settings, db, notifier):
 
 
 async def test_no_task_on_page_fails(settings, db, notifier):
-    await db.set_domain(HOST, "approved")
     boss = FakeBoss(extracts=[ExtractResult(status="no_task", error="на странице нет вопросов")])
     orch = make(settings, db, notifier, boss, FakeWorker())
     task = await settle(orch, (await orch.submit_url(URL)).id, (State.FAILED,))
@@ -158,7 +113,6 @@ async def test_no_task_on_page_fails(settings, db, notifier):
 
 async def test_many_questions_split_into_parts(settings, db, notifier):
     settings.max_questions = 15
-    await db.set_domain(HOST, "approved")
     first = "### ОТВЕТ\n" + "\n".join(f"{i}: x{i}" for i in range(1, 16))
     second = "### ОТВЕТ\n16: 32\n17: 34"
     worker = FakeWorker([first, second])
@@ -179,7 +133,6 @@ async def test_many_questions_split_into_parts(settings, db, notifier):
 
 
 async def test_revise_only_wrong_questions(settings, db, notifier):
-    await db.set_domain(HOST, "approved")
     worker = FakeWorker([ANSWERS_3, "### ОТВЕТ\n2: 1, 3"])
     boss = FakeBoss(["revise:2", "accept"], extracts=[extracted()])
     orch = make(settings, db, notifier, boss, worker)
@@ -194,7 +147,6 @@ async def test_revise_only_wrong_questions(settings, db, notifier):
 
 
 async def test_owner_fix_reopens_all_questions(settings, db, notifier):
-    await db.set_domain(HOST, "approved")
     worker = FakeWorker([ANSWERS_3, ANSWERS_3])
     boss = FakeBoss(["accept", "accept"], extracts=[extracted()])
     orch = make(settings, db, notifier, boss, worker)
@@ -209,12 +161,3 @@ async def test_text_tasks_unaffected_by_browser(settings, db, notifier, sessions
     task = await orch.submit_text("17*23?")
     task = await settle(orch, task.id, (State.AWAIT_CONFIRM,))
     assert task.final_answer == "391" and sessions.calls == []
-
-
-async def test_policy_result_stored(settings, db, notifier):
-    boss = FakeBoss(policies=[PolicyResult(verdict="forbidden", summary="ИИ запрещён", sources=["https://x/rules"])])
-    orch = make(settings, db, notifier, boss, FakeWorker())
-    task = await settle(orch, (await orch.submit_url(URL)).id, (State.AWAIT_DOMAIN,))
-    domain = await db.get_domain(HOST)
-    assert domain.verdict == "forbidden" and domain.source_list == ["https://x/rules"]
-    assert notifier.domains[-1] == (task.id, HOST, "forbidden")

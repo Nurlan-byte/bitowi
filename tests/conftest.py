@@ -13,7 +13,6 @@ class FakeNotifier:
         self.previews: list[tuple[int, str]] = []
         self.messages: list[str] = []
         self.photos: list[Path] = []
-        self.domains: list[tuple[int, str, str]] = []
 
     async def status(self, task, text: str) -> None:
         self.statuses.append(text)
@@ -26,9 +25,6 @@ class FakeNotifier:
 
     async def photo(self, task, path: Path, caption: str) -> None:
         self.photos.append(path)
-
-    async def domain_request(self, task, host: str, policy) -> None:
-        self.domains.append((task.id, host, policy.verdict))
 
 
 class FakeSessions:
@@ -62,7 +58,6 @@ def prompts_dir(tmp_path):
         'Раунд {round} из {max_rounds}.\nВерни JSON: {"verdict": "accept | revise"}', encoding="utf-8"
     )
     (d / "boss_extract.md").write_text("Открой {url}, скриншот в {screens_dir}/extract.png, до {max_questions}.", encoding="utf-8")
-    (d / "boss_policy.md").write_text("Правила на {url}.", encoding="utf-8")
     return d
 
 

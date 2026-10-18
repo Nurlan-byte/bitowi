@@ -5,7 +5,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from app.agents.base import Boss, BrowserOpts, ExtractResult, PolicyResult, QuestionVerdict, ReviewResult, Worker
+from app.agents.base import Boss, BrowserOpts, ExtractResult, QuestionVerdict, ReviewResult, Worker
 
 Step = str | BaseException | ReviewResult
 
@@ -42,11 +42,9 @@ class FakeBoss(Boss):
         self,
         verdicts: Iterable[Step] = (),
         extracts: Iterable[ExtractResult | BaseException] = (),
-        policies: Iterable[PolicyResult | BaseException] = (),
     ) -> None:
         self.verdicts = list(verdicts)
         self.extracts = list(extracts)
-        self.policies = list(policies)
         self.calls: list[dict[str, Any]] = []
         self.browser_calls: list[tuple[str, BrowserOpts]] = []
 
@@ -76,13 +74,6 @@ class FakeBoss(Boss):
                 ],
             )
         return ReviewResult(verdict="revise", comment_for_worker=f"Перепроверь расчёт (раунд {round_no}).")
-
-    async def check_policy(self, task_dir: Path, url: str, browser: BrowserOpts) -> PolicyResult:
-        self.browser_calls.append(("policy", browser))
-        step = _next(self.policies, PolicyResult(verdict="allowed", summary="Правила разрешают помощников.", sources=[url]))
-        if isinstance(step, BaseException):
-            raise step
-        return step
 
     async def extract(self, task_dir: Path, url: str, browser: BrowserOpts) -> ExtractResult:
         self.browser_calls.append(("extract", browser))

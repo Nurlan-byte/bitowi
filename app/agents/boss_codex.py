@@ -16,7 +16,6 @@ from app.agents.base import (
     BossBadJSON,
     BrowserOpts,
     ExtractResult,
-    PolicyResult,
     ReviewResult,
 )
 from app.config import Settings
@@ -131,10 +130,6 @@ class CodexBoss(Boss):
             + "\n\n## Твои служебные заметки\n\n" + json.dumps(private, ensure_ascii=False, indent=2)
         )
         return await self._ask_json(task_dir, prompt, ReviewResult)
-
-    async def check_policy(self, task_dir: Path, url: str, browser: BrowserOpts) -> PolicyResult:
-        prompt = fill(self.settings.prompt("boss_policy.md"), url=url, screens_dir=browser.output_dir)
-        return await self._ask_json(task_dir, prompt, PolicyResult, browser)
 
     async def extract(self, task_dir: Path, url: str, browser: BrowserOpts) -> ExtractResult:
         assert browser.guard, "извлечение — только с блокировкой кнопок сдачи"

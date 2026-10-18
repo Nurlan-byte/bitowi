@@ -63,12 +63,6 @@ class ExtractResult(BaseModel):
     private_notes: str = ""
 
 
-class PolicyResult(BaseModel):
-    verdict: Literal["allowed", "forbidden", "unclear"]
-    summary: str
-    sources: list[str] = []
-
-
 @dataclass(frozen=True)
 class BrowserOpts:
     """How the boss's browser is launched for one call."""
@@ -91,9 +85,6 @@ class Boss(ABC):
         self, task_dir: Path, notebook_text: str, private: dict[str, Any], round_no: int, max_rounds: int
     ) -> ReviewResult:
         """Check the executor's answers against the task, question by question."""
-
-    async def check_policy(self, task_dir: Path, url: str, browser: BrowserOpts) -> PolicyResult:
-        raise NotImplementedError
 
     async def extract(self, task_dir: Path, url: str, browser: BrowserOpts) -> ExtractResult:
         raise NotImplementedError

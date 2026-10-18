@@ -119,8 +119,8 @@ async def test_guard_allows_navigation_and_login(lms_settings, lms):
         await page.fill("input[name=password]", LMS_PASSWORD)
         await page.click("button[type=submit]")  # «Войти» — разрешено
         await page.wait_for_url("**/quiz/2")
-        await page.click("text=Правила платформы и академической честности")
-        await page.wait_for_url("**/rules")
+        await page.click("text=Мини-LMS")  # обычная ссылка — разрешена
+        await page.wait_for_url(lms + "/")
     finally:
         await browser.close()
         await pw.stop()

@@ -5,7 +5,7 @@ from pathlib import Path
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import FSInputFile
+from aiogram.types import FSInputFile, InputMediaPhoto
 
 from app.bot.keyboards import preview_kb
 from app.db import Database, Task
@@ -43,6 +43,27 @@ class TelegramNotifier:
     async def preview(self, task: Task, task_text: str, answer: str) -> None:
         body = f"Задача #{task.id}\n\nЗадание:\n{clip(task_text, 1500)}\n\nОтвет:\n{answer}"
         await self.bot.send_message(self.chat_id, clip(body), reply_markup=preview_kb(task.id))
+
+    async def course_preview(self, task: Task, shots: list[Path], answers: list[str], button: str) -> None:
+        """Screenshots with the filled answers, then the answers and the buttons [Отправить] [Исправить] [Отмена]."""
+        photos = [p for p in shots if p.exists()][:10]
+        if len(photos) == 1:
+            await self.photo(task, photos[0], f"Курс #{task.id} · перед сдачей")
+        elif photos:
+            caption = f"Курс #{task.id} · перед сдачей"
+            media = [InputMediaPhoto(media=FSInputFile(p), caption=caption if i == 0 else None)
+                     for i, p in enumerate(photos)]
+            try:
+                await self.bot.send_media_group(self.chat_id, media)
+            except TelegramBadRequest as exc:
+                log.warning("media group failed: %s", exc)
+                for p in photos:
+                    await self.photo(task, p, f"Курс #{task.id}")
+        lines = [f"Курс #{task.id}: готово к сдаче.", f"Будет нажато: {button or '—'}"]
+        if answers:
+            lines += ["", "Ответы:", *(f"{i}. {a}" for i, a in enumerate(answers, 1))]
+        lines += ["", "Отправить — сдать; Исправить — замечание исполнителю; Отмена — курс на паузу."]
+        await self.bot.send_message(self.chat_id, clip("\n".join(lines)), reply_markup=preview_kb(task.id))
 
     async def message(self, task: Task, text: str) -> None:
         await self.bot.send_message(self.chat_id, clip(text))

@@ -28,6 +28,7 @@ STATE_RU = {
     State.REVIEWING: "куратор проверяет",
     State.AWAIT_CONFIRM: "ждёт подтверждения",
     State.SUBMITTING: "сдача",
+    State.COURSE: "проходит курс",
     State.PAUSED: "на паузе",
     State.DONE: "готово",
     State.FAILED: "ошибка",
@@ -36,10 +37,11 @@ STATE_RU = {
 
 HELP = (
     "Команды:\n"
-    "ссылка или /task <url> — задача со страницы\n"
+    "ссылка или /task <url> — задача со страницы (только извлечение)\n"
+    "/course <url> — пройти курс (сдача — только после твоего «Отправить»)\n"
     "/text <задание> — новая задача текстом\n"
     "/status — текущая задача\n"
-    "/stop — отменить текущую задачу\n"
+    "/stop — остановить: курс — на паузу (второй /stop — отмена), задачу — отменить\n"
     "/resume — продолжить после паузы\n"
     "/history — последние 10 задач\n"
     "/id — твой Telegram ID\n\n"
@@ -82,6 +84,16 @@ def build_router(orch: Orchestrator, owner_id: int) -> Router:
         task = await orch.submit_url(url)
         if task.state == State.QUEUED:
             await message.answer(f"Задача #{task.id} в очереди — сейчас выполняется другая.")
+
+    @owner.message(Command("course"))
+    async def cmd_course(message: Message, command: CommandObject) -> None:
+        m = URL_RE.search(command.args or "")
+        if not m:
+            await message.answer("Пришли ссылку на курс: /course <url>")
+            return
+        task = await orch.submit_course(m.group(0))
+        if task.state == State.QUEUED:
+            await message.answer(f"Курс #{task.id} в очереди — сейчас выполняется другая задача.")
 
     @owner.message(Command("task"))
     async def cmd_task(message: Message, command: CommandObject) -> None:
@@ -127,19 +139,25 @@ def build_router(orch: Orchestrator, owner_id: int) -> Router:
         if not task:
             await message.answer("Сейчас задач нет." + (f" В очереди: {len(queued)}." if queued else ""))
             return
-        text = (
-            f"Задача #{task.id}: {STATE_RU.get(task.state, task.state)}\n"
-            f"Раунд {task.round}/{orch.settings.max_rounds}"
-        )
+        if task.kind == "course":
+            st = await orch.db.get_course(task.id)
+            text = f"Курс #{task.id}: {STATE_RU.get(task.state, task.state)}\n" + orch.course.status_line(task, st)
+        else:
+            text = (
+                f"Задача #{task.id}: {STATE_RU.get(task.state, task.state)}\n"
+                f"Раунд {task.round}/{orch.settings.max_rounds}"
+            )
         if queued:
             text += f"\nВ очереди: {len(queued)}"
         await message.answer(text)
 
     @owner.message(Command("stop"))
     async def cmd_stop(message: Message) -> None:
-        task = await orch.cancel()
+        task = await orch.stop()
         if not task:
-            await message.answer("Нечего отменять.")
+            await message.answer("Нечего останавливать.")
+        elif task.state == State.CANCELLED and task.kind == "course":
+            await message.answer(f"Курс #{task.id} отменён.")
 
     @owner.message(Command("resume"))
     async def cmd_resume(message: Message) -> None:
@@ -176,8 +194,14 @@ def build_router(orch: Orchestrator, owner_id: int) -> Router:
                 reply_markup=ForceReply(selective=True),
             )
         elif callback_data.action == "cancel":
-            task = await orch.cancel(tid)
-            await query.answer("Отменено" if task else "Задача уже завершена")
+            current = await orch.db.get_task(tid)
+            if current and current.kind == "course":
+                # курс не отменяется, а встаёт на паузу: /resume продолжит
+                task = await orch.pause_course(tid, "сдача отменена")
+                await query.answer("Курс на паузе" if task else "Курс уже не ждёт подтверждения")
+            else:
+                task = await orch.cancel(tid)
+                await query.answer("Отменено" if task else "Задача уже завершена")
         if query.message and callback_data.action in ("submit", "cancel"):
             await query.message.edit_reply_markup(reply_markup=None)
 

@@ -120,6 +120,10 @@ class CodexExecutor(CodexAgent, Executor):
     def mcp_command(self) -> str:
         return self.settings.courier_mcp_bin if self.sudo else super().mcp_command()
 
+    def lockdown_args(self) -> list[str]:
+        # в режиме sudo ограничения зашиты в обёртку bitowi-courier-run, вызывающий их не передаёт
+        return [] if self.sudo else super().lockdown_args()
+
     def codex_command(self, task_dir: Path, mcp: list[str] | None = None) -> list[str]:
         cmd = super().codex_command(task_dir, mcp)
         if not self.sudo:

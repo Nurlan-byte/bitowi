@@ -74,7 +74,7 @@ def test_worker_parse_errors():
 
 def test_boss_command_flags(settings, tmp_path):
     cmd = CodexBoss(settings).build_command(tmp_path)
-    assert cmd[:3] == ["codex", "exec", "--skip-git-repo-check"]
+    assert cmd[:2] == ["codex", "exec"] and "--skip-git-repo-check" in cmd
     assert cmd[cmd.index("--sandbox") + 1] == "read-only"
     assert cmd[cmd.index("-C") + 1] == str(tmp_path)
     assert cmd[-1] == "-"

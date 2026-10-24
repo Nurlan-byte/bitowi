@@ -1,13 +1,26 @@
 #!/bin/bash
 # Запуск курьера (codex exec + Playwright MCP) от пользователя bitowi-courier.
-#   sudo -n -u bitowi-courier /usr/local/bin/bitowi-courier-run <task_id> <timeout_sec> exec [флаги codex...]
+#   sudo -n -u bitowi-courier /usr/local/bin/bitowi-courier-run <task_id> <timeout_sec> exec [флаги codex...] -
 #   sudo -n -u bitowi-courier /usr/local/bin/bitowi-courier-run check <путь>...   — проверка доступа (тесты)
 # Установка (root): install -o root -g root -m 755 deploy/bitowi-courier-run /usr/local/bin/bitowi-courier-run
+#
+# Ограничения codex зашиты здесь, а не приходят от вызывающего: без shell/exec, дочерних агентов,
+# приложений аккаунта и пользовательского конфига, песочница read-only. Аргументы вызывающего —
+# только из белого списка.
 set -euo pipefail
 
 readonly RUN_ROOT=/srv/bitowi-courier
 readonly COURIER_USER=bitowi-courier
 readonly CODEX=/home/bitowi-courier/.local/bin/codex
+readonly MCP=/home/bitowi-courier/.local/bin/playwright-mcp
+
+# то же, что CODEX_LOCKDOWN в app/agents/boss_codex.py (тест сверяет списки)
+readonly LOCKDOWN_FEATURES=(
+    shell_tool unified_exec code_mode_host view_image multi_agent apps plugins
+    image_generation browser_use browser_use_external computer_use in_app_browser
+    sleep_tool tool_suggest skill_search skill_mcp_dependency_install goals
+    workspace_dependencies
+)
 
 export HOME=/home/bitowi-courier
 export CODEX_HOME=/home/bitowi-courier/.codex
@@ -33,7 +46,7 @@ if [[ "${1:-}" == "check" ]]; then
     exit 0
 fi
 
-(( $# >= 3 )) || die "использование: bitowi-courier-run <task_id> <timeout_sec> exec [флаги codex...]"
+(( $# >= 3 )) || die "использование: bitowi-courier-run <task_id> <timeout_sec> exec [флаги codex...] -"
 
 task_id=$1
 timeout_sec=$2
@@ -43,16 +56,51 @@ shift 2
 [[ "$timeout_sec" =~ ^[0-9]{1,5}$ ]] || die "неверный таймаут"
 (( timeout_sec > 0 )) || die "неверный таймаут"
 [[ "$1" == "exec" ]] || die "разрешён только codex exec"
-for arg in "$@"; do
-    case "$arg" in
-        *dangerously*|*danger-full-access*|--full-auto|--yolo) die "запрещённый флаг: $arg" ;;
-    esac
-done
+shift
 
 run_dir="$RUN_ROOT/$task_id"
 real="$(realpath -e -- "$run_dir")" || die "нет папки курьера"
 [[ "$real" == "$run_dir" ]] || die "папка курьера вне $RUN_ROOT"
 [[ -x "$CODEX" ]] || die "не найден $CODEX"
 
+# -c: только эти ключи; команда MCP — только playwright-mcp курьера; без evaluate/run_code
+check_config() {
+    local value=$1 key=${1%%=*}
+    case "$key" in
+        web_search) [[ "$value" == 'web_search="disabled"' ]] || die "web_search только disabled" ;;
+        mcp_servers.playwright.command)
+            [[ "$value" == "mcp_servers.playwright.command=\"$MCP\"" ]] || die "чужая команда MCP" ;;
+        mcp_servers.playwright.enabled_tools)
+            [[ "$value" != *evaluate* && "$value" != *run_code* ]] || die "запрещённый инструмент MCP" ;;
+        mcp_servers.playwright.args|mcp_servers.playwright.default_tools_approval_mode|mcp_servers.playwright.cwd) ;;
+        *) die "запрещённый ключ -c: $key" ;;
+    esac
+}
+
+args=()
+while (( $# )); do
+    case "$1" in
+        --skip-git-repo-check|--ephemeral|-) args+=("$1"); shift ;;
+        --color)
+            [[ "${2:-}" == "never" ]] || die "--color только never"
+            args+=("$1" "$2"); shift 2 ;;
+        -C)
+            [[ "${2:-}" == "$run_dir" ]] || die "-C только $run_dir"
+            args+=("$1" "$2"); shift 2 ;;
+        -o)
+            [[ "${2:-}" == "$run_dir/"* && "${2:-}" != *..* ]] || die "-o только внутри $run_dir"
+            args+=("$1" "$2"); shift 2 ;;
+        -c)
+            check_config "${2:-}"
+            args+=("$1" "$2"); shift 2 ;;
+        *) die "запрещённый аргумент: $1" ;;
+    esac
+done
+
+lockdown=(--ignore-user-config --sandbox read-only -c 'web_search="disabled"')
+for feature in "${LOCKDOWN_FEATURES[@]}"; do
+    lockdown+=(--disable "$feature")
+done
+
 cd -- "$real"
-exec timeout --kill-after=10 "$timeout_sec" "$CODEX" "$@"
+exec timeout --kill-after=10 "$timeout_sec" "$CODEX" exec "${lockdown[@]}" "${args[@]}"

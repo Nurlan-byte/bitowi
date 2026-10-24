@@ -87,21 +87,25 @@ class CodexAgent:
     def mcp_command(self) -> str:
         return runner.resolve_bin(self.settings.playwright_mcp_bin)
 
+    def lockdown_args(self) -> list[str]:
+        """Read-only sandbox, no user config, no shell/exec/sub-agents/apps."""
+        args = ["--sandbox", "read-only", "--ignore-user-config"]
+        for feature in CODEX_LOCKDOWN:
+            args += ["--disable", feature]
+        return args
+
     def codex_command(self, task_dir: Path, mcp: list[str] | None = None) -> list[str]:
         cmd = [
             runner.resolve_bin(self.settings.codex_bin),
             "exec",
+            *self.lockdown_args(),
             "--skip-git-repo-check",
             "-C", str(task_dir),
-            "--sandbox", "read-only",
             "--ephemeral",
-            "--ignore-user-config",
             "--color", "never",
             "-o", str(task_dir / self.out_name),
             "-c", 'web_search="disabled"',
         ]
-        for feature in CODEX_LOCKDOWN:
-            cmd += ["--disable", feature]
         if mcp is not None:
             cmd += [
                 "-c", f"mcp_servers.playwright.command={_toml(self.mcp_command())}",

@@ -57,8 +57,17 @@ def test_courier_sudo_command(settings):
     conf = {c.split("=", 1)[0]: c.split("=", 1)[1] for c in cmd if c.startswith("mcp_servers.")}
     assert json.loads(conf["mcp_servers.playwright.command"]) == settings.courier_mcp_bin
     assert json.loads(conf["mcp_servers.playwright.cwd"]) == str(run_dir / "uploads")
+    # ограничения добавляет обёртка — вызывающий их не передаёт
+    assert not flags(cmd, "--disable") and "--sandbox" not in cmd and "--ignore-user-config" not in cmd
     with pytest.raises(ValueError):
         CodexExecutor(settings).build_command(settings.tasks_dir / "42", FakeBrowser(), allow_upload=False)
+
+
+def test_wrapper_lockdown_matches_code():
+    text = WRAPPER.read_text()
+    block = text.split("readonly LOCKDOWN_FEATURES=(", 1)[1].split(")", 1)[0]
+    assert block.split() == list(CODEX_LOCKDOWN)
+    assert "--ignore-user-config --sandbox read-only" in text
 
 
 def test_upload_is_copied_only_for_approved_submit(settings, tmp_path):
@@ -103,26 +112,53 @@ def run(script, *args, stdin=""):
 
 
 @linux
-def test_wrapper_runs_codex_exec_in_run_dir(wrapper):
+def test_wrapper_adds_lockdown_and_accepts_code_command(wrapper, settings):
+    """The command built by CodexExecutor (sudo mode) passes the wrapper; lockdown comes from the wrapper."""
     script, root = wrapper
-    res = run(script, "7", "20", "exec", "--sandbox", "read-only", "-", stdin="действия")
+    settings.courier_mode = "sudo"
+    settings.courier_root = root
+    cmd = CodexExecutor(settings).build_command(settings.courier_dir(7), FakeBrowser(), allow_upload=False)
+    res = run(script, *cmd[5:], stdin="действия")
     assert res.returncode == 0, res.stderr
     data = json.loads(res.stdout)
     assert data["cwd"] == str(root / "7") and data["umask"] == "0o7"
     assert data["home"] == "/home/bitowi-courier" and data["codex_home"] == "/home/bitowi-courier/.codex"
-    assert data["args"] == ["exec", "--sandbox", "read-only", "-"] and data["stdin"] == "действия"
+    args = data["args"]
+    assert args[:6] == ["exec", "--ignore-user-config", "--sandbox", "read-only", "-c", 'web_search="disabled"']
+    assert flags(args, "--disable") == list(CODEX_LOCKDOWN)
+    assert args[-1] == "-" and data["stdin"] == "действия"
+
+
+@linux
+@pytest.mark.parametrize("extra", [
+    ["--dangerously-bypass-approvals-and-sandbox"], ["--sandbox", "danger-full-access"], ["--enable", "shell_tool"],
+    ["-c", "features.shell_tool=true"], ["-c", 'sandbox_mode="danger-full-access"'],
+    ["-c", 'mcp_servers.playwright.command="/bin/sh"'], ["-c", 'mcp_servers.evil.command="/bin/sh"'],
+    ["-c", 'mcp_servers.playwright.enabled_tools=["browser_click","browser_evaluate"]'],
+    ["-c", 'web_search="live"'], ["-C", "/tmp"], ["-o", "/tmp/out.txt"], ["--profile", "x"], ["--full-auto"],
+])
+def test_wrapper_rejects_weakening(wrapper, extra):
+    script, root = wrapper
+    res = run(script, "7", "20", "exec", "-C", str(root / "7"), *extra, "-")
+    assert res.returncode == 64 and "bitowi-courier-run:" in res.stderr
 
 
 @linux
 @pytest.mark.parametrize("args", [
     ["../7", "20", "exec"], ["abc", "20", "exec"], ["7", "0", "exec"], ["7", "20", "login"],
-    ["7", "20", "exec", "--dangerously-bypass-approvals-and-sandbox"],
-    ["7", "20", "exec", "--sandbox", "danger-full-access"], ["8", "20", "exec"], ["7", "20"],
+    ["8", "20", "exec", "-"], ["7", "20"],
 ])
 def test_wrapper_rejects(wrapper, args):
     script, _ = wrapper
     res = run(script, *args)
     assert res.returncode == 64 and "bitowi-courier-run:" in res.stderr
+
+
+@linux
+def test_wrapper_rejects_output_outside_run_dir(wrapper):
+    script, root = wrapper
+    res = run(script, "7", "20", "exec", "-o", f"{root}/7/../8/out.txt", "-")
+    assert res.returncode == 64
 
 
 @linux

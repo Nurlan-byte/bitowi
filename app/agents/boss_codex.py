@@ -60,10 +60,12 @@ def _toml(value: Any) -> str:
 
 
 # функции Codex, дающие модели доступ к машине или к приложениям аккаунта (Gmail, GitHub, Drive…):
-# shell, exec, дочерние агенты, просмотр файлов-картинок. Проверено на codex 0.163: без них модель
+# shell, дочерние агенты, просмотр файлов-картинок. Проверено на codex 0.163: без них модель
 # не читает файлы владельца. Это второй слой — курьер ещё и работает от отдельного пользователя.
+# code_mode_host не выключаем: через него вызываются инструменты MCP (браузер); JS в нём без импортов —
+# ни файлов, ни shell (проверено приманкой).
 CODEX_LOCKDOWN = (
-    "shell_tool", "unified_exec", "code_mode_host", "view_image", "multi_agent", "apps", "plugins",
+    "shell_tool", "unified_exec", "view_image", "multi_agent", "apps", "plugins",
     "image_generation", "browser_use", "browser_use_external", "computer_use", "in_app_browser",
     "sleep_tool", "tool_suggest", "skill_search", "skill_mcp_dependency_install", "goals",
     "workspace_dependencies",

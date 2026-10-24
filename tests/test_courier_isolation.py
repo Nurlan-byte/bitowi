@@ -40,7 +40,8 @@ def test_codex_lockdown_for_boss_and_courier(settings, tmp_path):
     courier = CodexExecutor(settings).build_command(tmp_path / "run", FakeBrowser(), allow_upload=False)
     for cmd in (boss, courier):
         assert set(flags(cmd, "--disable")) == set(CODEX_LOCKDOWN)
-        for must in ("shell_tool", "unified_exec", "code_mode_host", "multi_agent", "apps", "view_image"):
+        for must in ("shell_tool", "unified_exec", "multi_agent", "apps", "view_image"):
+            assert "code_mode_host" not in CODEX_LOCKDOWN  # через него вызываются инструменты MCP
             assert must in CODEX_LOCKDOWN
         assert "--ignore-user-config" in cmd and flags(cmd, "--sandbox") == ["read-only"]
 

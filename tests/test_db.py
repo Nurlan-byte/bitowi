@@ -30,3 +30,11 @@ async def test_migration_drops_domains_and_cancels_waiting(tmp_path):
     await db.close()
     assert waiting.state == "CANCELLED" and waiting.parent_id is None
     assert done.state == "DONE"
+
+
+def test_settings_repr_hides_secrets(settings):
+    settings.bot_token = "123:SECRET-TOKEN"
+    settings.demo_moodle_password = "moodle-secret"
+    settings.fake_lms_password = "lms-secret"
+    text = repr(settings) + str(settings)
+    assert "SECRET-TOKEN" not in text and "moodle-secret" not in text and "lms-secret" not in text

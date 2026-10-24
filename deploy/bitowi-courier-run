@@ -4,7 +4,7 @@
 #   sudo -n -u bitowi-courier /usr/local/bin/bitowi-courier-run check <путь>...   — проверка доступа (тесты)
 # Установка (root): install -o root -g root -m 755 deploy/bitowi-courier-run /usr/local/bin/bitowi-courier-run
 #
-# Ограничения codex зашиты здесь, а не приходят от вызывающего: без shell/exec, дочерних агентов,
+# Ограничения codex зашиты здесь, а не приходят от вызывающего: без shell, дочерних агентов,
 # приложений аккаунта и пользовательского конфига, песочница read-only. Аргументы вызывающего —
 # только из белого списка.
 set -euo pipefail
@@ -16,7 +16,7 @@ readonly MCP=/home/bitowi-courier/.local/bin/playwright-mcp
 
 # то же, что CODEX_LOCKDOWN в app/agents/boss_codex.py (тест сверяет списки)
 readonly LOCKDOWN_FEATURES=(
-    shell_tool unified_exec code_mode_host view_image multi_agent apps plugins
+    shell_tool unified_exec view_image multi_agent apps plugins
     image_generation browser_use browser_use_external computer_use in_app_browser
     sleep_tool tool_suggest skill_search skill_mcp_dependency_install goals
     workspace_dependencies

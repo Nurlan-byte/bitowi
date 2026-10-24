@@ -4,14 +4,15 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    bot_token: str = ""
+    # секреты не попадают в repr (вывод упавших тестов, логи)
+    bot_token: str = Field(default="", repr=False)
     owner_id: int = 0
 
     max_rounds: int = 5
@@ -67,10 +68,10 @@ class Settings(BaseSettings):
     # вход по форме (пароли модели не передаются — вход делает оркестратор)
     demo_moodle_host: str = "school.moodledemo.net"
     demo_moodle_user: str = ""
-    demo_moodle_password: str = ""
+    demo_moodle_password: str = Field(default="", repr=False)
     fake_lms_host: str = "127.0.0.1:8765"
     fake_lms_user: str = "student"
-    fake_lms_password: str = ""
+    fake_lms_password: str = Field(default="", repr=False)
 
     @field_validator("data_dir", "tasks_dir", "prompts_dir", "courier_root", mode="after")
     @classmethod

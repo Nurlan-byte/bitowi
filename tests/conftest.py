@@ -59,6 +59,7 @@ def prompts_dir(tmp_path):
     )
     (d / "boss_extract.md").write_text("Открой {url}, скриншот в {screens_dir}/extract.png, до {max_questions}.", encoding="utf-8")
     (d / "course_courier.md").write_text("Выполни действия в браузере и опиши экран. Верни JSON.", encoding="utf-8")
+    (d / "course_worker.md").write_text("Вход — состояние экрана. Верни JSON.", encoding="utf-8")
     return d
 
 

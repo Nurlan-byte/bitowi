@@ -78,6 +78,10 @@ class Worker(ABC):
     async def solve(self, notebook_text: str, workspace: Path) -> str:
         """Read the (sanitized) notebook, return the executor's reply."""
 
+    async def decide(self, screen_text: str, workspace: Path):
+        """Course mode: screen state (sanitized) → app.course.models.Decision."""
+        raise NotImplementedError
+
 
 class Boss(ABC):
     @abstractmethod

@@ -1,11 +1,12 @@
 """Scripted fake agents for tests: no CLI calls, no subscriptions spent."""
 
 import asyncio
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
 from app.agents.base import Boss, BrowserOpts, ExtractResult, QuestionVerdict, ReviewResult, Worker
+from app.course.models import Decision
 
 Step = str | BaseException | ReviewResult
 
@@ -17,10 +18,27 @@ def _next(steps: list, default):
 class FakeWorker(Worker):
     """Returns scripted replies; an exception in the script is raised instead."""
 
-    def __init__(self, replies: Iterable[str | BaseException] = (), delay: float = 0.0) -> None:
+    def __init__(
+        self,
+        replies: Iterable[str | BaseException] = (),
+        delay: float = 0.0,
+        decisions: Iterable["Decision | BaseException | Callable[[str], Decision]"] = (),
+    ) -> None:
         self.replies = list(replies)
         self.delay = delay
         self.calls: list[str] = []
+        # режим курса: готовое решение, исключение или функция от текста экрана
+        self.decisions = list(decisions)
+        self.screens: list[str] = []
+
+    async def decide(self, screen_text: str, workspace: Path) -> Decision:
+        self.screens.append(screen_text)
+        if self.delay:
+            await asyncio.sleep(self.delay)
+        step = _next(self.decisions, Decision(status="stuck", comment="сценарий закончился"))
+        if isinstance(step, BaseException):
+            raise step
+        return step(screen_text) if callable(step) else step
 
     async def solve(self, notebook_text: str, workspace: Path) -> str:
         self.calls.append(notebook_text)

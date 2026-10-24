@@ -48,6 +48,8 @@ class Settings(BaseSettings):
     course_viewport: str = "1280x900"
     # доп. источники через «;» для --allowed-origins (CDN платформы), по умолчанию — только домен курса
     course_extra_origins: str = ""
+    # доп. слова через «;», которые воркер не должен видеть (название вуза, платформы)
+    course_banned_words: str = ""
     # local — codex от текущего пользователя (разработка); sudo — от COURIER_USER через обёртку,
     # без доступа к /home бота (.env, state.json, логины)
     courier_mode: Literal["local", "sudo"] = "local"

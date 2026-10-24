@@ -8,9 +8,13 @@ import json
 import logging
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from app.agents import runner
 from app.agents.base import AgentError, AgentLimit, Worker
+from app.agents.boss_codex import FIX_JSON, fill, parse_json
 from app.config import Settings
+from app.course.models import Decision
 
 log = logging.getLogger(__name__)
 
@@ -57,10 +61,10 @@ class ClaudeWorker(Worker):
             "permissions": {"deny": deny},
         })
 
-    def write_files(self, task_dir: Path) -> None:
+    def write_files(self, task_dir: Path, prompt_name: str = "worker.md") -> None:
         """Put the system prompt and settings next to the workspace (readable by the worker's group)."""
         task_dir.mkdir(parents=True, exist_ok=True)
-        (task_dir / SYSTEM_FILE).write_text(self.settings.prompt("worker.md"), encoding="utf-8")
+        (task_dir / SYSTEM_FILE).write_text(self.settings.prompt(prompt_name), encoding="utf-8")
         (task_dir / SETTINGS_FILE).write_text(self.sandbox_settings(), encoding="utf-8")
 
     def claude_args(self, task_dir: Path) -> list[str]:
@@ -87,17 +91,35 @@ class ClaudeWorker(Worker):
             ]
         return [runner.resolve_bin(self.settings.claude_bin), *self.claude_args(task_dir)]
 
-    async def solve(self, notebook_text: str, workspace: Path) -> str:
-        workspace.mkdir(parents=True, exist_ok=True)
-        self.write_files(workspace.parent)
+    async def _claude(self, workspace: Path, stdin: str) -> str:
         sudo = self.settings.worker_mode == "sudo"
         res = await self._run(
             self.build_command(workspace.parent),
             cwd=workspace,
             timeout=self.settings.worker_timeout + (SUDO_GRACE if sudo else 0),
-            stdin=PROMPT_HEADER + notebook_text,
+            stdin=stdin,
         )
         return parse_output(res)
+
+    async def solve(self, notebook_text: str, workspace: Path) -> str:
+        workspace.mkdir(parents=True, exist_ok=True)
+        self.write_files(workspace.parent)
+        return await self._claude(workspace, PROMPT_HEADER + notebook_text)
+
+    async def decide(self, screen_text: str, workspace: Path) -> Decision:
+        """Course mode, one step: the screen state in, the next actions out (JSON by schema)."""
+        workspace.mkdir(parents=True, exist_ok=True)
+        self.write_files(workspace.parent, "course_worker.md")
+        error = ""
+        for attempt in range(2):
+            stdin = screen_text if attempt == 0 else screen_text + fill(FIX_JSON, error=error)
+            reply = await self._claude(workspace, stdin)
+            try:
+                return Decision.model_validate(parse_json(reply))
+            except (ValueError, ValidationError) as exc:
+                error = str(exc).splitlines()[0][:200]
+                log.warning("worker returned bad JSON (attempt %d): %s", attempt + 1, error)
+        raise AgentError(f"Исполнитель дважды вернул невалидный JSON: {error}")
 
 
 def parse_output(res: runner.RunResult) -> str:

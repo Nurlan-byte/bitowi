@@ -29,7 +29,7 @@ def test_courier_command(settings, tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "resolve_bin", lambda name: name)
     settings.course_extra_origins = "https://cdn.test; "
     ex = CodexExecutor(settings)
-    cmd = ex.build_command(tmp_path / "run", FakeBrowser(), tmp_path / "ws", allow_upload=False)
+    cmd = ex.build_command(tmp_path / "run", FakeBrowser(), allow_upload=False)
     conf = {c.split("=", 1)[0]: c.split("=", 1)[1] for c in cmd if c.startswith("mcp_servers.")}
     tools = json.loads(conf["mcp_servers.playwright.enabled_tools"])
     assert tools == COURIER_TOOLS
@@ -40,10 +40,10 @@ def test_courier_command(settings, tmp_path, monkeypatch):
     assert args[args.index("--cdp-endpoint") + 1] == "http://127.0.0.1:9333"
     assert args[args.index("--allowed-origins") + 1] == "https://lms.test;https://cdn.test"
     assert "--no-webmcp" in args and (tmp_path / "run" / "guard.js").exists()
-    assert json.loads(conf["mcp_servers.playwright.cwd"]) == str(tmp_path / "ws")
+    assert json.loads(conf["mcp_servers.playwright.cwd"]) == str(tmp_path / "run" / "uploads")
     assert cmd[-1] == "-" and 'web_search="disabled"' in cmd
 
-    up = ex.build_command(tmp_path / "run", FakeBrowser(), tmp_path / "ws", allow_upload=True)
+    up = ex.build_command(tmp_path / "run", FakeBrowser(), allow_upload=True)
     conf = {c.split("=", 1)[0]: c.split("=", 1)[1] for c in up if c.startswith("mcp_servers.")}
     assert UPLOAD_TOOL in json.loads(conf["mcp_servers.playwright.enabled_tools"])
 
@@ -62,7 +62,7 @@ async def test_courier_report_parsed(settings, tmp_path, monkeypatch):
     from app.course.models import Action
 
     ex = CodexExecutor(settings, run=fake_run)
-    report = await ex.run(FakeBrowser(), [Action(action="click", element=3)], tmp_path / "run", tmp_path / "ws", False)
+    report = await ex.run(FakeBrowser(), [Action(action="click", element=3)], tmp_path / "run", False)
     assert report.results[0].ok and report.progress == "40%"
     assert '"element": 3' in seen["stdin"] and seen["timeout"] == settings.courier_timeout
     assert "lms.test" not in seen["stdin"]  # в промпте курьера — только действия

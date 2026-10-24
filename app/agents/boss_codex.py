@@ -59,6 +59,17 @@ def _toml(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+# функции Codex, дающие модели доступ к машине или к приложениям аккаунта (Gmail, GitHub, Drive…):
+# shell, exec, дочерние агенты, просмотр файлов-картинок. Проверено на codex 0.163: без них модель
+# не читает файлы владельца. Это второй слой — курьер ещё и работает от отдельного пользователя.
+CODEX_LOCKDOWN = (
+    "shell_tool", "unified_exec", "code_mode_host", "view_image", "multi_agent", "apps", "plugins",
+    "image_generation", "browser_use", "browser_use_external", "computer_use", "in_app_browser",
+    "sleep_tool", "tool_suggest", "skill_search", "skill_mcp_dependency_install", "goals",
+    "workspace_dependencies",
+)
+
+
 class CodexAgent:
     """`codex exec` with a JSON answer: shared by the boss and the course courier."""
 
@@ -73,6 +84,9 @@ class CodexAgent:
     def timeout(self) -> int:
         return self.settings.boss_timeout
 
+    def mcp_command(self) -> str:
+        return runner.resolve_bin(self.settings.playwright_mcp_bin)
+
     def codex_command(self, task_dir: Path, mcp: list[str] | None = None) -> list[str]:
         cmd = [
             runner.resolve_bin(self.settings.codex_bin),
@@ -81,13 +95,16 @@ class CodexAgent:
             "-C", str(task_dir),
             "--sandbox", "read-only",
             "--ephemeral",
+            "--ignore-user-config",
             "--color", "never",
             "-o", str(task_dir / self.out_name),
             "-c", 'web_search="disabled"',
         ]
+        for feature in CODEX_LOCKDOWN:
+            cmd += ["--disable", feature]
         if mcp is not None:
             cmd += [
-                "-c", f"mcp_servers.playwright.command={_toml(runner.resolve_bin(self.settings.playwright_mcp_bin))}",
+                "-c", f"mcp_servers.playwright.command={_toml(self.mcp_command())}",
                 "-c", f"mcp_servers.playwright.args={_toml(mcp)}",
                 "-c", 'mcp_servers.playwright.default_tools_approval_mode="approve"',
             ]

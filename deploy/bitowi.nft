@@ -1,0 +1,21 @@
+#!/usr/sbin/nft -f
+# bitowi: исполнителю (bitowi-worker) закрыт localhost — CDP-порт браузера бота, мини-LMS.
+# Только своя таблица: общий ruleset и правила Docker не трогаем (никакого flush ruleset).
+# Установка: install -o root -g root -m 644 deploy/bitowi.nft /etc/bitowi/bitowi.nft
+
+# пересоздать только таблицу bitowi
+table inet bitowi
+delete table inet bitowi
+
+table inet bitowi {
+    chain output {
+        type filter hook output priority 0; policy accept;
+
+        # DNS через systemd-resolved (127.0.0.53) — нужен исполнителю для выхода в API
+        meta skuid "bitowi-worker" ip daddr 127.0.0.53 udp dport 53 accept
+        meta skuid "bitowi-worker" ip daddr 127.0.0.53 tcp dport 53 accept
+
+        meta skuid "bitowi-worker" ip daddr 127.0.0.0/8 counter drop
+        meta skuid "bitowi-worker" ip6 daddr ::1 counter drop
+    }
+}

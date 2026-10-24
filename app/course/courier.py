@@ -7,11 +7,13 @@ code checks the page numbers, the guard's refusals and the course domain.
 
 import json
 import logging
+import shutil
 from abc import ABC, abstractmethod
 from pathlib import Path
 
 from pydantic import BaseModel
 
+from app.agents import runner
 from app.agents.boss_codex import CodexAgent, _toml
 from app.browser.guard import write_guard
 from app.config import Settings
@@ -33,6 +35,10 @@ COURIER_TOOLS = [
 ]
 # загрузка файла — только в вызове сдачи после «Отправить» владельца
 UPLOAD_TOOL = "browser_file_upload"
+
+
+def upload_dir(run_dir: Path) -> Path:
+    return run_dir / "uploads"
 
 
 class StepReport(BaseModel):
@@ -60,7 +66,7 @@ class ExecResult(BaseModel):
 class Executor(ABC):
     @abstractmethod
     async def run(
-        self, browser: CourseBrowser, actions: list[Action], run_dir: Path, workspace: Path, allow_upload: bool
+        self, browser: CourseBrowser, actions: list[Action], run_dir: Path, allow_upload: bool
     ) -> CourierReport:
         """Perform the actions on elements marked data-bitowi-n."""
 
@@ -69,7 +75,7 @@ class DirectExecutor(Executor):
     """Plain Playwright clicks, real mouse events: the guard sees them as it sees MCP clicks."""
 
     async def run(
-        self, browser: CourseBrowser, actions: list[Action], run_dir: Path, workspace: Path, allow_upload: bool
+        self, browser: CourseBrowser, actions: list[Action], run_dir: Path, allow_upload: bool
     ) -> CourierReport:
         page = browser.page
         report = CourierReport()
@@ -83,7 +89,7 @@ class DirectExecutor(Executor):
                 elif a.action == "select":
                     await loc.select_option(label=a.value, timeout=5000)
                 elif a.action == "upload":
-                    path = safe_upload_path(a.value, workspace)
+                    path = safe_upload_path(a.value, upload_dir(run_dir))
                     if not allow_upload or not path:
                         raise ValueError("загрузка файла не разрешена")
                     await loc.set_input_files(str(path), timeout=5000)
@@ -96,12 +102,35 @@ class DirectExecutor(Executor):
 
 
 class CodexExecutor(CodexAgent, Executor):
+    """COURIER_MODE=sudo: codex runs as COURIER_USER through deploy/bitowi-courier-run, in
+    COURIER_ROOT/<task_id>, and cannot read the bot's home (.env, state.json, CLI logins)."""
+
     who = "Курьер"
     out_name = "courier_last.txt"
 
     @property
+    def sudo(self) -> bool:
+        return self.settings.courier_mode == "sudo"
+
+    @property
     def timeout(self) -> int:
-        return self.settings.courier_timeout
+        # запас поверх таймаута обёртки (timeout --kill-after=10 внутри)
+        return self.settings.courier_timeout + (30 if self.sudo else 0)
+
+    def mcp_command(self) -> str:
+        return self.settings.courier_mcp_bin if self.sudo else super().mcp_command()
+
+    def codex_command(self, task_dir: Path, mcp: list[str] | None = None) -> list[str]:
+        cmd = super().codex_command(task_dir, mcp)
+        if not self.sudo:
+            return cmd
+        if task_dir.parent != self.settings.courier_root:
+            raise ValueError(f"папка курьера вне {self.settings.courier_root}: {task_dir}")
+        # путь к codex зафиксирован в обёртке
+        return [
+            runner.resolve_bin("sudo"), "-n", "-u", self.settings.courier_user, self.settings.courier_runner,
+            task_dir.name, str(self.settings.courier_timeout), *cmd[1:],
+        ]
 
     def allowed_origins(self, browser: CourseBrowser) -> str:
         extra = [o.strip() for o in self.settings.course_extra_origins.split(";") if o.strip()]
@@ -117,12 +146,13 @@ class CodexExecutor(CodexAgent, Executor):
             "--timeout-action", "10000",
         ]
 
-    def build_command(self, run_dir: Path, browser: CourseBrowser, workspace: Path, allow_upload: bool) -> list[str]:
+    def build_command(self, run_dir: Path, browser: CourseBrowser, allow_upload: bool) -> list[str]:
         tools = COURIER_TOOLS + ([UPLOAD_TOOL] if allow_upload else [])
+        upload_dir(run_dir).mkdir(parents=True, exist_ok=True)
         return self.codex_command(run_dir, self.mcp_args(browser, run_dir)) + [
             "-c", f"mcp_servers.playwright.enabled_tools={_toml(tools)}",
-            # корень файлов MCP: загрузить можно только из рабочей папки задачи
-            "-c", f"mcp_servers.playwright.cwd={_toml(str(workspace))}",
+            # корень файлов MCP: только файлы, которые код скопировал для одобренной сдачи
+            "-c", f"mcp_servers.playwright.cwd={_toml(str(upload_dir(run_dir)))}",
             "-",
         ]
 
@@ -135,9 +165,9 @@ class CodexExecutor(CodexAgent, Executor):
         )
 
     async def run(
-        self, browser: CourseBrowser, actions: list[Action], run_dir: Path, workspace: Path, allow_upload: bool
+        self, browser: CourseBrowser, actions: list[Action], run_dir: Path, allow_upload: bool
     ) -> CourierReport:
-        cmd = self.build_command(run_dir, browser, workspace, allow_upload)
+        cmd = self.build_command(run_dir, browser, allow_upload)
         return await self.ask_json(run_dir, self.prompt(actions), CourierReport, cmd)
 
 
@@ -158,6 +188,7 @@ class Courier:
         """Run actions in order. Scrolling is done by the code, the rest by the executor in batches."""
         out = ExecResult()
         if allow_submit:
+            actions = [self._stage_upload(a) for a in actions]
             await self.browser.allow_submit()
         try:
             batch: list[Action] = []
@@ -185,7 +216,7 @@ class Courier:
             why = "не выполнено: шаг остановлен" if out.offsite else "страница сменилась — номера устарели"
             out.results += [ActionResult(action=a, ok=False, error=why) for a in batch]
             return
-        report = await self.executor.run(self.browser, batch, self.run_dir, self.workspace, allow_submit)
+        report = await self.executor.run(self.browser, batch, self.run_dir, allow_submit)
         by_i = {r.i: r for r in report.results}
         refused = dict(await self.browser.blocked())
         for i, a in enumerate(batch, 1):
@@ -199,3 +230,13 @@ class Courier:
         out.messages += report.messages
         out.progress = report.progress or out.progress
         out.offsite = await self.browser.check_domain()
+
+    def _stage_upload(self, action: Action) -> Action:
+        """Copy an approved file from the task workspace to the courier's upload dir."""
+        src = safe_upload_path(action.value, self.workspace) if action.action == "upload" else None
+        if not src:
+            return action
+        dst = upload_dir(self.run_dir) / src.name
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, dst)
+        return action.model_copy(update={"value": str(dst)})

@@ -1,0 +1,58 @@
+#!/bin/bash
+# Запуск курьера (codex exec + Playwright MCP) от пользователя bitowi-courier.
+#   sudo -n -u bitowi-courier /usr/local/bin/bitowi-courier-run <task_id> <timeout_sec> exec [флаги codex...]
+#   sudo -n -u bitowi-courier /usr/local/bin/bitowi-courier-run check <путь>...   — проверка доступа (тесты)
+# Установка (root): install -o root -g root -m 755 deploy/bitowi-courier-run /usr/local/bin/bitowi-courier-run
+set -euo pipefail
+
+readonly RUN_ROOT=/srv/bitowi-courier
+readonly COURIER_USER=bitowi-courier
+readonly CODEX=/home/bitowi-courier/.local/bin/codex
+
+export HOME=/home/bitowi-courier
+export CODEX_HOME=/home/bitowi-courier/.codex
+export PATH=/home/bitowi-courier/.local/bin:/usr/local/bin:/usr/bin:/bin
+export LANG=C.UTF-8
+export LC_ALL=C.UTF-8
+# файлы курьера — для группы bitowi-courier (бот читает ответ), остальным ничего
+umask 007
+
+die() {
+    echo "bitowi-courier-run: $1" >&2
+    exit 64
+}
+
+[[ "$(id -un)" == "$COURIER_USER" ]] || die "запускать только от $COURIER_USER"
+
+# проверка изоляции: что курьер может прочитать (ничего не запускает)
+if [[ "${1:-}" == "check" ]]; then
+    shift
+    for path in "$@"; do
+        if [[ -r "$path" ]]; then echo "readable $path"; else echo "denied $path"; fi
+    done
+    exit 0
+fi
+
+(( $# >= 3 )) || die "использование: bitowi-courier-run <task_id> <timeout_sec> exec [флаги codex...]"
+
+task_id=$1
+timeout_sec=$2
+shift 2
+
+[[ "$task_id" =~ ^[0-9]{1,9}$ ]] || die "неверный номер задачи"
+[[ "$timeout_sec" =~ ^[0-9]{1,5}$ ]] || die "неверный таймаут"
+(( timeout_sec > 0 )) || die "неверный таймаут"
+[[ "$1" == "exec" ]] || die "разрешён только codex exec"
+for arg in "$@"; do
+    case "$arg" in
+        *dangerously*|*danger-full-access*|--full-auto|--yolo) die "запрещённый флаг: $arg" ;;
+    esac
+done
+
+run_dir="$RUN_ROOT/$task_id"
+real="$(realpath -e -- "$run_dir")" || die "нет папки курьера"
+[[ "$real" == "$run_dir" ]] || die "папка курьера вне $RUN_ROOT"
+[[ -x "$CODEX" ]] || die "не найден $CODEX"
+
+cd -- "$real"
+exec timeout --kill-after=10 "$timeout_sec" "$CODEX" "$@"

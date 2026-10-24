@@ -48,6 +48,13 @@ class Settings(BaseSettings):
     course_viewport: str = "1280x900"
     # доп. источники через «;» для --allowed-origins (CDN платформы), по умолчанию — только домен курса
     course_extra_origins: str = ""
+    # local — codex от текущего пользователя (разработка); sudo — от COURIER_USER через обёртку,
+    # без доступа к /home бота (.env, state.json, логины)
+    courier_mode: Literal["local", "sudo"] = "local"
+    courier_user: str = "bitowi-courier"
+    courier_runner: str = "/usr/local/bin/bitowi-courier-run"
+    courier_root: Path = Path("/srv/bitowi-courier")
+    courier_mcp_bin: str = "/home/bitowi-courier/.local/bin/playwright-mcp"
 
     # вход по форме (пароли модели не передаются — вход делает оркестратор)
     demo_moodle_host: str = "school.moodledemo.net"
@@ -57,7 +64,7 @@ class Settings(BaseSettings):
     fake_lms_user: str = "student"
     fake_lms_password: str = ""
 
-    @field_validator("data_dir", "tasks_dir", "prompts_dir", mode="after")
+    @field_validator("data_dir", "tasks_dir", "prompts_dir", "courier_root", mode="after")
     @classmethod
     def _expand(cls, value: Path) -> Path:
         return value.expanduser().resolve()
@@ -78,6 +85,10 @@ class Settings(BaseSettings):
     @property
     def boss_root(self) -> Path:
         return self.data_dir / "boss"
+
+    def courier_dir(self, task_id: int) -> Path:
+        """Courier's working dir: guard.js, MCP output, files approved for upload."""
+        return self.courier_root / str(task_id)
 
     def prompt(self, name: str) -> str:
         """Read a system prompt template from PROMPTS_DIR."""

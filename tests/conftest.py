@@ -72,6 +72,7 @@ def settings(tmp_path, prompts_dir):
         data_dir=tmp_path / "data",
         tasks_dir=tmp_path / "tasks",
         prompts_dir=prompts_dir,
+        courier_root=tmp_path / "courier",
     )
 
 

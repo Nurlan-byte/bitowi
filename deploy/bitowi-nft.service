@@ -1,0 +1,16 @@
+# bitowi: таблица nft inet bitowi при загрузке. Только она — nftables.service не включаем.
+# Установка: install -o root -g root -m 644 deploy/bitowi-nft.service /etc/systemd/system/bitowi-nft.service
+#            systemctl daemon-reload && systemctl enable --now bitowi-nft.service
+[Unit]
+Description=bitowi: nft table inet bitowi (localhost closed for bitowi-worker)
+After=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/bitowi/bitowi.nft
+ExecStop=/usr/sbin/nft delete table inet bitowi
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,5 @@
+# bitowi: бот (nurlan) запускает курьера только через обёртку и только от bitowi-courier.
+# Проверка: visudo -cf deploy/sudoers-bitowi-courier
+# Установка: install -o root -g root -m 440 deploy/sudoers-bitowi-courier /etc/sudoers.d/bitowi-courier
+Defaults!/usr/local/bin/bitowi-courier-run !use_pty, env_reset, !lecture
+nurlan ALL=(bitowi-courier) NOPASSWD: /usr/local/bin/bitowi-courier-run

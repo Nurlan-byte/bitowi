@@ -22,6 +22,7 @@ from app.browser.session import LoginFailed, SessionExpired
 from app.browser.sites import host_of, profile_for
 from app.config import Settings
 from app.db import Database, Task
+from app.course.runner import CoursePause, CourseRunner
 from app.notebook import CLIENT, EXECUTOR, Notebook
 
 log = logging.getLogger(__name__)
@@ -34,6 +35,8 @@ class State(StrEnum):
     REVIEWING = "REVIEWING"
     AWAIT_CONFIRM = "AWAIT_CONFIRM"
     SUBMITTING = "SUBMITTING"
+    # режим курса: цикл осмотр → решение → действия
+    COURSE = "COURSE"
     PAUSED = "PAUSED"
     DONE = "DONE"
     FAILED = "FAILED"
@@ -42,8 +45,10 @@ class State(StrEnum):
 
 TERMINAL = (State.DONE, State.FAILED, State.CANCELLED)
 # задача в этих состояниях занимает слот: следующая из очереди не стартует
-BUSY = (State.EXTRACTING, State.SOLVING, State.REVIEWING, State.AWAIT_CONFIRM, State.SUBMITTING, State.PAUSED)
-RUNNING = (State.EXTRACTING, State.SOLVING, State.REVIEWING, State.SUBMITTING)
+BUSY = (
+    State.EXTRACTING, State.SOLVING, State.REVIEWING, State.AWAIT_CONFIRM, State.SUBMITTING, State.COURSE, State.PAUSED,
+)
+RUNNING = (State.EXTRACTING, State.SOLVING, State.REVIEWING, State.SUBMITTING, State.COURSE)
 
 
 class Notifier(Protocol):
@@ -51,6 +56,7 @@ class Notifier(Protocol):
     async def preview(self, task: Task, task_text: str, answer: str) -> None: ...
     async def message(self, task: Task, text: str) -> None: ...
     async def photo(self, task: Task, path: Path, caption: str) -> None: ...
+    async def course_preview(self, task: Task, shots: list[Path], answers: list[str], button: str) -> None: ...
 
 
 class Sessions(Protocol):
@@ -67,6 +73,7 @@ class Orchestrator:
         worker: Worker,
         notifier: Notifier,
         sessions: Sessions | None = None,
+        course: CourseRunner | None = None,
     ) -> None:
         self.settings = settings
         self.db = db
@@ -74,6 +81,7 @@ class Orchestrator:
         self.worker = worker
         self.notifier = notifier
         self.sessions = sessions
+        self.course = course
         self._lock = asyncio.Lock()
         self._runner: asyncio.Task | None = None
 
@@ -125,6 +133,11 @@ class Orchestrator:
     async def submit_url(self, url: str) -> Task:
         return await self._submit("url", url)
 
+    async def submit_course(self, url: str) -> Task:
+        if not self.course:
+            raise RuntimeError("режим курса не настроен")
+        return await self._submit("course", url)
+
     async def _submit(self, kind: str, text: str) -> Task:
         task = await self.db.create_task(kind, text, State.QUEUED)
         await self.db.add_event(task.id, "created")
@@ -142,7 +155,13 @@ class Orchestrator:
         task = await self.db.get_task(task_id)
         if not task or task.state != State.AWAIT_CONFIRM:
             return False
-        # Этап 3: здесь будет SUBMITTING → boss.submit(..., BrowserOpts(guard=False))
+        if task.kind == "course":
+            # курьер нажимает отложенные кнопки сдачи, курс идёт дальше
+            await self.db.add_event(task_id, "owner_submit")
+            await self.db.update_task(task_id, state=State.SUBMITTING)
+            self._start(task_id)
+            return True
+        # Этап 2: сдачи на платформе нет — «Отправить» просто завершает задачу
         await self._finish(task, State.DONE)
         await self._kick()
         return True
@@ -152,6 +171,13 @@ class Orchestrator:
         task = await self.db.get_task(task_id)
         if not task or task.state != State.AWAIT_CONFIRM:
             return False
+        if task.kind == "course":
+            # замечания владельца — воркеру в следующий вход, потом новое превью
+            await self.course.fix(task, text)
+            await self.db.add_event(task_id, "owner_fix")
+            await self.db.update_task(task_id, state=State.COURSE)
+            self._start(task_id)
+            return True
         self.notebook(task_id).append(CLIENT, text)
         answers = self.load_answers(task_id)
         answers["pending"] = list(answers["expected"])
@@ -168,6 +194,9 @@ class Orchestrator:
             return None
         if task.state == State.AWAIT_CONFIRM:
             await self.request_fix(task.id, text)
+        elif task.kind == "course":
+            await self.course.add_remark(task, text)
+            await self.db.add_event(task.id, "owner_remark")
         else:
             self.notebook(task.id).append(CLIENT, text)
             await self.db.add_event(task.id, "owner_remark")
@@ -177,16 +206,46 @@ class Orchestrator:
         task = await self.db.get_task(task_id) if task_id else await self.active_task()
         if not task or task.state in TERMINAL:
             return None
+        await self._halt(task)
+        task = await self.db.update_task(task.id, state=State.CANCELLED)
+        await self.db.add_event(task.id, "cancelled")
+        await self.notifier.status(task, f"Задача #{task.id} отменена.")
+        await self._kick()
+        return task
+
+    async def _halt(self, task: Task) -> None:
+        """Stop the running step right away (agent processes are killed) and close the course browser."""
         if self._runner and not self._runner.done() and getattr(self._runner, "task_id", None) == task.id:
             self._runner.cancel()
             try:
                 await self._runner
             except asyncio.CancelledError:
                 pass
-        task = await self.db.update_task(task.id, state=State.CANCELLED)
-        await self.db.add_event(task.id, "cancelled")
-        await self.notifier.status(task, f"Задача #{task.id} отменена.")
-        await self._kick()
+        if self.course and self.course.task_id == task.id:
+            await self.course.close()
+
+    async def stop(self) -> Task | None:
+        """/stop: a course goes to pause (/resume continues from the same place); other tasks are cancelled."""
+        task = await self.active_task()
+        if not task:
+            return None
+        if task.kind != "course":
+            return await self.cancel(task.id)
+        if task.state == State.PAUSED:
+            # уже на паузе — второй /stop отменяет курс совсем
+            return await self.cancel(task.id)
+        return await self.pause_course(task.id, "по команде /stop")
+
+    async def pause_course(self, task_id: int, why: str) -> Task | None:
+        """Pause a course (/stop, «Отмена» on the preview): the pending submission is dropped."""
+        task = await self.db.get_task(task_id)
+        if not task or task.kind != "course" or task.state in (*TERMINAL, State.PAUSED):
+            return None
+        await self._halt(task)
+        await self.course.drop_pending(task)
+        task = await self.db.update_task(task_id, state=State.PAUSED, resume_state=State.COURSE)
+        await self.db.add_event(task_id, "paused", why)
+        await self.notifier.status(task, f"Курс #{task_id} на паузе ({why}). Продолжить — /resume, отменить — /stop")
         return task
 
     async def resume(self) -> Task | None:
@@ -226,6 +285,10 @@ class Orchestrator:
     async def _prepare(self, task: Task) -> None:
         (self.task_dir(task.id) / "workspace").mkdir(parents=True, exist_ok=True)
         self.boss_dir(task.id).mkdir(parents=True, exist_ok=True)
+        if task.kind == "course":
+            await self.course.start(task)
+            await self.db.update_task(task.id, state=State.COURSE)
+            return
         if task.kind == "url":
             self.save_private(task.id, {"source": "url", "url": task.input, "host": host_of(task.input)})
             await self.db.update_task(task.id, state=State.EXTRACTING, round=1)
@@ -253,6 +316,8 @@ class Orchestrator:
         except asyncio.CancelledError:
             cancelled = True
             raise
+        except CoursePause as exc:
+            await self._pause(task_id, exc.event, exc.text, exc.text)
         except AgentLimit as exc:
             await self._pause(task_id, "limit", str(exc), "упёрлись в лимит подписки. Продолжить — /resume")
         except SessionExpired as exc:
@@ -275,6 +340,11 @@ class Orchestrator:
         finally:
             if not cancelled:
                 task = await self.db.get_task(task_id)
+                # браузер курса живёт, только пока курс идёт или ждёт «Отправить»
+                if self.course and self.course.task_id == task_id and (
+                    not task or task.state not in (State.COURSE, State.SUBMITTING, State.AWAIT_CONFIRM)
+                ):
+                    await self.course.close()
                 if task and task.state in TERMINAL:
                     asyncio.create_task(self._kick())
 
@@ -301,8 +371,25 @@ class Orchestrator:
                 await self.notifier.status(task, f"{self._title(task)} · раунд {task.round}/{max_rounds} · куратор проверяет")
                 if await self._review(task):
                     return
+            elif task.state == State.COURSE:
+                outcome = await self.course.run(task)
+                if outcome == "done":
+                    await self._course_done(task)
+                    return
+                await self.db.update_task(task_id, state=State.AWAIT_CONFIRM)
+                return
+            elif task.state == State.SUBMITTING and task.kind == "course":
+                await self.course.submit(task)
+                await self.db.update_task(task_id, state=State.COURSE)
             else:
                 return
+
+    async def _course_done(self, task: Task) -> None:
+        st = await self.db.get_course(task.id)
+        task = await self.db.update_task(task.id, state=State.DONE)
+        await self.db.add_event(task.id, "done")
+        await self.notifier.status(task, f"Курс #{task.id} · пройден")
+        await self.notifier.message(task, self.course.report(task, st))
 
     @staticmethod
     def _title(task: Task) -> str:

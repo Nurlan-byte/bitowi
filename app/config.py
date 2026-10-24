@@ -50,6 +50,12 @@ class Settings(BaseSettings):
     course_extra_origins: str = ""
     # доп. слова через «;», которые воркер не должен видеть (название вуза, платформы)
     course_banned_words: str = ""
+    # лимиты одного запуска курса (до паузы; /resume продолжает с теми же счётчиками шагов на странице)
+    course_max_steps: int = 300
+    course_max_runtime: int = 7200
+    course_max_steps_per_page: int = 15
+    # тот же экран столько раз подряд — застряли
+    course_stuck_repeats: int = 3
     # local — codex от текущего пользователя (разработка); sudo — от COURIER_USER через обёртку,
     # без доступа к /home бота (.env, state.json, логины)
     courier_mode: Literal["local", "sudo"] = "local"

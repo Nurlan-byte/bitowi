@@ -30,6 +30,12 @@ CREATE TABLE IF NOT EXISTS events (
     kind TEXT NOT NULL,
     payload TEXT
 );
+-- режим курса: позиция, счётчики, ожидающая сдача (JSON)
+CREATE TABLE IF NOT EXISTS courses (
+    task_id INTEGER PRIMARY KEY REFERENCES tasks(id),
+    data TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 # колонки, добавленные после этапа 1: (имя, определение)
@@ -148,6 +154,19 @@ class Database:
         ) as cur:
             rows = await cur.fetchall()
         return [Task(**dict(r)) for r in rows]
+
+    async def get_course(self, task_id: int) -> dict[str, Any]:
+        async with self.conn.execute("SELECT data FROM courses WHERE task_id = ?", (task_id,)) as cur:
+            row = await cur.fetchone()
+        return json.loads(row["data"]) if row else {}
+
+    async def save_course(self, task_id: int, data: dict[str, Any]) -> None:
+        await self.conn.execute(
+            "INSERT INTO courses (task_id, data, updated_at) VALUES (?, ?, ?)"
+            " ON CONFLICT(task_id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at",
+            (task_id, json.dumps(data, ensure_ascii=False), _now()),
+        )
+        await self.conn.commit()
 
     async def add_event(self, task_id: int, kind: str, payload: Any = None) -> None:
         data = None if payload is None else json.dumps(payload, ensure_ascii=False)

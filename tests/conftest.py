@@ -13,6 +13,7 @@ class FakeNotifier:
         self.previews: list[tuple[int, str]] = []
         self.messages: list[str] = []
         self.photos: list[Path] = []
+        self.course_previews: list[tuple[int, list[Path], list[str], str]] = []
 
     async def status(self, task, text: str) -> None:
         self.statuses.append(text)
@@ -25,6 +26,9 @@ class FakeNotifier:
 
     async def photo(self, task, path: Path, caption: str) -> None:
         self.photos.append(path)
+
+    async def course_preview(self, task, shots: list[Path], answers: list[str], button: str) -> None:
+        self.course_previews.append((task.id, shots, answers, button))
 
 
 class FakeSessions:

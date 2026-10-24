@@ -12,6 +12,8 @@ from app.bot.handlers import build_router
 from app.bot.notifier import TelegramNotifier
 from app.browser.session import BrowserSessions
 from app.config import get_settings
+from app.course.courier import CodexExecutor
+from app.course.runner import CourseRunner
 from app.db import Database
 from app.orchestrator import Orchestrator
 
@@ -30,9 +32,10 @@ async def main() -> None:
     await db.connect()
     bot = Bot(settings.bot_token)
     notifier = TelegramNotifier(bot, settings.owner_id, db)
-    orch = Orchestrator(
-        settings, db, CodexBoss(settings), ClaudeWorker(settings), notifier, BrowserSessions(settings)
-    )
+    worker = ClaudeWorker(settings)
+    sessions = BrowserSessions(settings)
+    course = CourseRunner(settings, db, worker, notifier, sessions, CodexExecutor(settings))
+    orch = Orchestrator(settings, db, CodexBoss(settings), worker, notifier, sessions, course)
 
     dp = Dispatcher()
     dp.include_router(build_router(orch, settings.owner_id))

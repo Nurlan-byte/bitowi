@@ -45,6 +45,9 @@ class CourseBrowser:
         self.port = 0
         self.last_url = start_url
         self.stamp = ""
+        # точка обзора: её двигает только действие scroll; клики и ввод (браузер сам прокручивает к полю) — нет
+        self.view_url = ""
+        self.view_y = 0
         # заблокированные переходы главной вкладки на чужой домен
         self.offsite_attempts: list[str] = []
         self._pw = None
@@ -126,7 +129,8 @@ class CourseBrowser:
         """Number the elements and screenshot the visible part (several shots for a long page)."""
         page = self.page
         await page.wait_for_load_state("domcontentloaded")
-        start = await page.evaluate("scrollY")
+        start = self.view_y if page.url == self.view_url else 0
+        self.view_url, self.view_y = page.url, start
         data = await page.evaluate(OVERLAY_JS, SUBMIT_CLASSES)
         self.stamp = data["stamp"]
 
@@ -171,7 +175,13 @@ class CourseBrowser:
             return []
 
     async def scroll(self, direction: str) -> None:
-        await self.page.evaluate("(d) => window.scrollBy(0, d * innerHeight * 0.9)", 1 if direction == "down" else -1)
+        page = self.page
+        y = self.view_y if page.url == self.view_url else 0
+        step = int(await page.evaluate("innerHeight") * 0.9)
+        limit = max(0, await page.evaluate("document.documentElement.scrollHeight - innerHeight"))
+        self.view_url = page.url
+        self.view_y = min(limit, max(0, y + (step if direction == "down" else -step)))
+        await page.evaluate("(y) => window.scrollTo(0, y)", self.view_y)
 
     async def allow_submit(self, count: int = 3, seconds: int = 120) -> None:
         """One-shot allowance for the guard: the submit button plus its confirmation."""

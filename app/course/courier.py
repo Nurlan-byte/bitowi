@@ -35,6 +35,8 @@ COURIER_TOOLS = [
 ]
 # загрузка файла — только в вызове сдачи после «Отправить» владельца
 UPLOAD_TOOL = "browser_file_upload"
+# действий на один вызов курьера; перед каждой пачкой — проверка, что страница та же
+COURIER_BATCH = 20
 
 
 def upload_dir(run_dir: Path) -> Path:
@@ -200,9 +202,10 @@ class Courier:
                 if a is not None and a.action != "scroll":
                     batch.append(a)
                     continue
-                if batch:
-                    await self._run_batch(batch, allow_submit, out)
-                    batch = []
+                # длинный список — пачками: один вызов курьера не должен упираться в таймаут
+                for i in range(0, len(batch), COURIER_BATCH):
+                    await self._run_batch(batch[i : i + COURIER_BATCH], allow_submit, out)
+                batch = []
                 if a is None:
                     break
                 if out.offsite:

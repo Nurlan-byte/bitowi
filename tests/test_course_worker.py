@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from app.agents.base import AgentError
+from app.agents.base import WorkerBadJSON
 from app.agents.fakes import FakeWorker
 from app.agents.runner import RunResult
 from app.agents.worker_claude import ClaudeWorker
@@ -98,8 +98,10 @@ async def test_decide_bad_json_twice(settings):
     async def fake_run(cmd, *, cwd, timeout, stdin):
         return _claude_json('{"status": "maybe"}')
 
-    with pytest.raises(AgentError, match="невалидный JSON"):
+    with pytest.raises(WorkerBadJSON) as err:
         await ClaudeWorker(settings, run=fake_run).decide("ЭКРАН", settings.tasks_dir / "6" / "workspace")
+    assert err.value.replies == ['{"status": "maybe"}'] * 2
+    assert err.value.errors[0].startswith("status: Input should be")
 
 
 async def test_fake_worker_decisions(tmp_path):

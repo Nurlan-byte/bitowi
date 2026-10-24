@@ -61,7 +61,7 @@ SCHEME_SVG = """<svg xmlns="http://www.w3.org/2000/svg" width="360" height="140"
 
 def reset() -> None:
     PROGRESS.clear()
-    STATS.update(quiz_checks=0, exam_submits=0, traps={t: 0 for t in TRAPS})
+    STATS.update(quiz_checks=0, exam_submits=0, big_checks=0, traps={t: 0 for t in TRAPS})
 
 
 reset()
@@ -253,6 +253,36 @@ async def exam_submit(request: Request):
     state["done"].add("exam")
     total = len(BY_ID["exam"]["questions"])
     return layout(request, "Курс завершён", f"<p class='feedback'>Экзамен сдан: {score} из {total}. Курс завершён.</p>")
+
+
+# большой тест вне курса (как «Balancing Chemical Equations» в Moodle): 25 вопросов по два числовых поля
+BIG = 25
+
+
+@router.get("/course/big")
+async def big_quiz(request: Request):
+    if (resp := _guard(request)):
+        return resp
+    rows = "".join(
+        f'<div class="q"><p>Вопрос {i}. Найдите x и y: x + y = {2 * i + 1}, x − y = 1.</p>'
+        f'<p><label>x: <input type="text" name="x{i}"></label> <label>y: <input type="text" name="y{i}"></label></p></div>'
+        for i in range(1, BIG + 1)
+    )
+    return layout(request, "Большой тест", f'<form method="post" action="/course/big/check">{rows}'
+                  '<button type="submit">Проверить</button></form>')
+
+
+@router.post("/course/big/check")
+async def big_check(request: Request):
+    if (resp := _guard(request)):
+        return resp
+    STATS["big_checks"] += 1
+    form = await request.form()
+    score = sum(
+        str(form.get(f"x{i}", "")).strip() == str(i + 1) and str(form.get(f"y{i}", "")).strip() == str(i)
+        for i in range(1, BIG + 1)
+    )
+    return layout(request, "Результат", f"<p class='feedback'>Баллы: {score} из {BIG}</p>")
 
 
 @router.get("/course/scheme.svg")

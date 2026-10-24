@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
-from app.agents.base import Worker
+from app.agents.base import Worker, WorkerBadJSON
 from app.browser.sites import profile_for
 from app.config import Settings
 from app.course.browser import CourseBrowser
@@ -29,6 +29,8 @@ log = logging.getLogger(__name__)
 # после «Отправить» владельца: столько следующих шагов, состоящих только из нажатий кнопок сдачи,
 # идут без нового подтверждения — это сводка и окно подтверждения той же сдачи
 SUBMIT_FLOW_STEPS = 2
+# больше за шаг не выполняем: остальное — следующим шагом (большие тесты на 25+ вопросов)
+MAX_ACTIONS_PER_STEP = 60
 
 _SCORE_RE = re.compile(r"(?:балл\w*|оценка|mark|grade|score)\s*:?\s*\d+(?:[.,]\d+)?\s*(?:из|/|out of)\s*\d+(?:[.,]\d+)?",
                        re.IGNORECASE)
@@ -180,7 +182,13 @@ class CourseRunner:
             results = [ActionResult.model_validate(r) for r in st["last_results"]]
             history = [StepLog.model_validate(h) for h in st["history"]]
             text = render(screen, shots, results, history, st["remarks"], banned, st["notes"])
-            decision = await self.worker.decide(text, ws)
+            try:
+                decision = await self.worker.decide(text, ws)
+            except WorkerBadJSON as exc:
+                self._save_bad_json(task, st, screen, exc)
+                await self._save(task, st)
+                raise CoursePause("bad_json", f"ответ исполнителя дважды не прошёл проверку ({exc.errors[-1][:200]}). "
+                                              "Сырые ответы — в журнале задачи. Продолжить — /resume") from exc
             st["step"] += 1
             run_steps += 1
             await self.db.add_event(task.id, "course_step", {"step": st["step"], "status": decision.status,
@@ -196,8 +204,14 @@ class CourseRunner:
                 raise CoursePause("stuck", f"исполнитель не может продолжить: {decision.comment or 'без пояснения'}. "
                                            "Ответь на это сообщение подсказкой и /resume")
 
-            plan = plan_actions(decision.actions, screen.elements, ws)
             notes: list[str] = []
+            actions = decision.actions
+            if len(actions) > MAX_ACTIONS_PER_STEP:
+                # сдача в хвосте не нажимается, пока не заполнено остальное
+                actions = actions[:MAX_ACTIONS_PER_STEP]
+                notes.append(f"За шаг выполняется не больше {MAX_ACTIONS_PER_STEP} действий — выполнены первые "
+                             f"{MAX_ACTIONS_PER_STEP} из {len(decision.actions)}; остальные верни следующим шагом.")
+            plan = plan_actions(actions, screen.elements, ws)
             auto = (
                 st["grant"] > 0
                 and plan.pending_submit
@@ -227,7 +241,7 @@ class CourseRunner:
                 return "await_confirm"
             else:
                 st["grant"] = 0
-                if decision.status == "submit_ready":
+                if decision.status == "submit_ready" and len(actions) == len(decision.actions):
                     notes.append("Статус submit_ready, но среди действий нет кнопки сдачи — "
                                  "добавь её нажатие последним действием.")
             await self._after(task, st, screen, decision, results, notes)
@@ -339,6 +353,24 @@ class CourseRunner:
 
     async def _save(self, task: Task, st: dict[str, Any]) -> None:
         await self.db.save_course(task.id, st)
+
+    def _save_bad_json(self, task: Task, st: dict[str, Any], screen: Screen, exc: WorkerBadJSON) -> None:
+        """Raw replies → boss dir (not seen by the worker), the errors → journal."""
+        folder = self.boss_dir(task.id) / "bad_json"
+        folder.mkdir(parents=True, exist_ok=True)
+        files = []
+        for i, reply in enumerate(exc.replies, 1):
+            path = folder / f"step{st['step'] + 1}-{i}.txt"
+            path.write_text(reply, encoding="utf-8")
+            files.append(path.name)
+        entry = {
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "step": st["step"] + 1, "url": screen.url, "title": screen.title, "status": "bad_json",
+            "errors": exc.errors, "replies": files, "reply_chars": [len(r) for r in exc.replies],
+            "elements": len(screen.elements),
+        }
+        with (self.boss_dir(task.id) / "journal.jsonl").open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
     def _journal(self, task: Task, st: dict[str, Any], screen: Screen, decision, results: list[ActionResult]) -> None:
         entry = {

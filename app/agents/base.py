@@ -24,6 +24,15 @@ class BossBadJSON(AgentError):
     """Boss returned invalid JSON twice in a row."""
 
 
+class WorkerBadJSON(AgentError):
+    """Worker's course decision did not match the schema twice. Raw replies are kept for the journal."""
+
+    def __init__(self, message: str, replies: list[str], errors: list[str]) -> None:
+        super().__init__(message)
+        self.replies = replies
+        self.errors = errors
+
+
 class QuestionVerdict(BaseModel):
     n: int
     ok: bool

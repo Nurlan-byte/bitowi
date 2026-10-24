@@ -11,8 +11,8 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from app.agents import runner
-from app.agents.base import AgentError, AgentLimit, Worker
-from app.agents.boss_codex import FIX_JSON, fill, parse_json
+from app.agents.base import AgentError, AgentLimit, Worker, WorkerBadJSON
+from app.agents.boss_codex import fill, parse_json
 from app.config import Settings
 from app.course.models import Decision
 
@@ -26,6 +26,13 @@ WEB_TOOLS = "WebSearch,WebFetch"
 PROMPT_HEADER = (
     "Заказчик обновил общий рабочий блокнот. Ниже он целиком. "
     "Ответь на последнее задание с учётом всех замечаний.\n\n"
+)
+
+# повтор после ответа не по схеме: точная ошибка и как уложиться (большие страницы — частями)
+WORKER_FIX_JSON = (
+    "\n\nПрошлый ответ не прошёл проверку схемы: {error}\n"
+    "Верни ТОЛЬКО JSON по схеме, без markdown и пояснений. Значения value — строки. "
+    "Если действий много — верни первые (до 40) со статусом continue, остальные — следующим шагом."
 )
 
 # запас поверх таймаута обёртки (timeout --kill-after=10 внутри)
@@ -110,16 +117,31 @@ class ClaudeWorker(Worker):
         """Course mode, one step: the screen state in, the next actions out (JSON by schema)."""
         workspace.mkdir(parents=True, exist_ok=True)
         self.write_files(workspace.parent, "course_worker.md")
-        error = ""
+        replies: list[str] = []
+        errors: list[str] = []
         for attempt in range(2):
-            stdin = screen_text if attempt == 0 else screen_text + fill(FIX_JSON, error=error)
+            stdin = screen_text if attempt == 0 else screen_text + fill(WORKER_FIX_JSON, error=errors[-1])
             reply = await self._claude(workspace, stdin)
+            replies.append(reply)
             try:
                 return Decision.model_validate(parse_json(reply))
             except (ValueError, ValidationError) as exc:
-                error = str(exc).splitlines()[0][:200]
-                log.warning("worker returned bad JSON (attempt %d): %s", attempt + 1, error)
-        raise AgentError(f"Исполнитель дважды вернул невалидный JSON: {error}")
+                errors.append(describe_error(exc, reply))
+                log.warning("worker returned bad JSON (attempt %d, %d chars): %s", attempt + 1, len(reply), errors[-1])
+        raise WorkerBadJSON(f"Исполнитель дважды вернул ответ не по схеме: {errors[-1]}", replies, errors)
+
+
+def describe_error(exc: Exception, reply: str) -> str:
+    """Which field and what is wrong — for the retry prompt and the journal (no field values)."""
+    if isinstance(exc, ValidationError):
+        items = [f"{'.'.join(map(str, e['loc'])) or 'ответ'}: {e['msg']}" for e in exc.errors()[:5]]
+        more = exc.error_count() - len(items)
+        return "; ".join(items) + (f"; и ещё {more}" if more > 0 else "")
+    text = str(exc).splitlines()[0][:200]
+    tail = reply.rstrip()[-1:] if reply.strip() else ""
+    if tail and tail not in "}]`":
+        text += " (ответ обрывается — похоже, слишком длинный)"
+    return text
 
 
 def parse_output(res: runner.RunResult) -> str:

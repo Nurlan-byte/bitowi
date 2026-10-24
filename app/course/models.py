@@ -1,8 +1,27 @@
 """Data passed between the course layers. Each layer gets these as input and returns them as output."""
 
-from typing import Literal
+import re
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, field_validator
+
+
+def as_text(v: Any) -> Any:
+    """Numbers, lists and small objects → text; other types are left for the validator to reject."""
+    if v is None:
+        return ""
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    if isinstance(v, (int, float)):
+        return str(v)
+    if isinstance(v, list):
+        return ", ".join(str(as_text(x)) for x in v)
+    if isinstance(v, dict):
+        return "; ".join(f"{k}: {as_text(x)}" for k, x in v.items())
+    return v
+
 
 ActionKind = Literal["click", "type", "select", "scroll", "upload"]
 ElementKind = Literal["button", "link", "text", "textarea", "select", "checkbox", "radio", "file", "other"]
@@ -15,6 +34,25 @@ class Action(BaseModel):
     element: int | None = None
     # type — текст; select — вариант; scroll — up | down; upload — путь внутри workspace
     value: str = ""
+
+    # модель пишет естественно: «"value": 2», «"element": "[12]"», null — приводим, а не отвергаем
+    @field_validator("action", mode="before")
+    @classmethod
+    def _action(cls, v: Any) -> Any:
+        return v.strip().lower() if isinstance(v, str) else v
+
+    @field_validator("element", mode="before")
+    @classmethod
+    def _element(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            m = re.fullmatch(r"\s*\[?\s*(\d+)\s*\]?\s*", v)
+            return int(m.group(1)) if m else v
+        return v
+
+    @field_validator("value", mode="before")
+    @classmethod
+    def _value(cls, v: Any) -> Any:
+        return as_text(v)
 
 
 class Element(BaseModel):
@@ -79,8 +117,29 @@ class Decision(BaseModel):
 
     status: Literal["continue", "submit_ready", "course_done", "stuck"]
     answers: list[str] = []
-    actions: list[Action] = Field(default_factory=list, max_length=30)
+    actions: list[Action] = []
     comment: str = ""
+
+    @field_validator("status", mode="before")
+    @classmethod
+    def _status(cls, v: Any) -> Any:
+        return v.strip().lower() if isinstance(v, str) else v
+
+    @field_validator("answers", mode="before")
+    @classmethod
+    def _answers(cls, v: Any) -> Any:
+        if v is None:
+            return []
+        if isinstance(v, dict):
+            return [f"{k} — {as_text(a)}" for k, a in v.items()]
+        if isinstance(v, list):
+            return [as_text(a) for a in v]
+        return [as_text(v)]
+
+    @field_validator("comment", mode="before")
+    @classmethod
+    def _comment(cls, v: Any) -> Any:
+        return as_text(v)
 
 
 class ActionPlan(BaseModel):

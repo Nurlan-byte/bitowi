@@ -47,8 +47,10 @@ class Settings(BaseSettings):
     courier_timeout: int = 300
     course_max_shots: int = 4
     course_viewport: str = "1280x900"
-    # доп. источники через «;» для --allowed-origins (CDN платформы), по умолчанию — только домен курса
-    course_extra_origins: str = ""
+    # исключения из запрета локальных адресов, хост:порт через «;» (LMS в локальной сети; в тестах — CDN)
+    course_private_allow: str = ""
+    # внешних доменов (куда переходила вкладка) за курс; дальше — пауза
+    course_max_external_domains: int = 5
     # доп. слова через «;», которые воркер не должен видеть (название вуза, платформы)
     course_banned_words: str = ""
     # лимиты одного запуска курса (до паузы; /resume продолжает с теми же счётчиками шагов на странице)

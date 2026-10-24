@@ -66,7 +66,12 @@ def el(n, kind="button", label="", **kw) -> Element:
 def test_classify():
     assert el(1, label="Выйти").blocked == "deny"
     assert el(2, "link", "Мой курс", href="https://lms.test/user/profile.php").blocked == "deny"
-    assert el(3, "link", "Википедия", href="https://wikipedia.org/x").blocked == "offsite"
+    wiki = el(3, "link", "Википедия", href="https://wikipedia.org/x")
+    assert wiki.blocked == "" and wiki.external  # внешние сайты открыты
+    assert el(31, "link", "Роутер", href="http://192.168.0.1/").blocked == "private"
+    assert el(32, "link", "Сервис", href="http://localhost:8080/").blocked == "private"
+    assert el(33, "link", "Файл", href="file:///etc/passwd").blocked == "private"
+    assert not el(34, "link", "Раздел", href="https://sub.lms.test/x").external
     assert el(4, "link", "Модуль 2", href="https://lms.test/course/2").blocked == ""
     assert el(5, label="Отправить").submit
     assert el(6, "file").submit

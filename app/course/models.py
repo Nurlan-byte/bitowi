@@ -24,7 +24,7 @@ def as_text(v: Any) -> Any:
 
 
 ActionKind = Literal["click", "type", "select", "scroll", "upload"]
-ElementKind = Literal["button", "link", "text", "textarea", "select", "checkbox", "radio", "file", "other"]
+ElementKind = Literal["button", "link", "text", "password", "textarea", "select", "checkbox", "radio", "file", "other"]
 
 
 class Action(BaseModel):
@@ -71,6 +71,8 @@ class Element(BaseModel):
     submit_class: bool = False
     submit: bool = False
     blocked: str = ""
+    # ссылка ведёт на внешний сайт (не домен курса)
+    external: bool = False
 
     def for_worker(self) -> str:
         line = f"[{self.n}] {self.kind}" + (f": {self.label}" if self.label else "")
@@ -82,6 +84,8 @@ class Element(BaseModel):
             line += " (отмечено)" if self.checked else " (не отмечено)"
         if self.disabled:
             line += " (неактивен)"
+        if self.external and not self.blocked:
+            line += " (внешний сайт)"
         if self.blocked:
             line += " (недоступен)"
         elif self.submit:
@@ -107,6 +111,10 @@ class Screen(BaseModel):
     progress: str = ""
     # страница длиннее снятых скриншотов — есть смысл прокрутить вниз
     more_below: bool = False
+    # SPA успела нарисовать текст или элементы
+    rendered: bool = True
+    # страница не на домене курса
+    external: bool = False
     # только для оркестратора
     url: str = ""
     title: str = ""

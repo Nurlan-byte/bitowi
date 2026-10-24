@@ -12,6 +12,7 @@ from aiogram.types import CallbackQuery, ForceReply, Message
 from app.bot.keyboards import TaskAction
 from app.bot.notifier import clip
 from app.browser.sites import auth_file
+from app.course.netpolicy import split_course_input
 from app.orchestrator import Orchestrator, State
 
 log = logging.getLogger(__name__)
@@ -40,6 +41,7 @@ HELP = (
     "ссылка или /task <url> — задача со страницы (только извлечение)\n"
     "/course <url> — пройти курс (сдача — только после твоего «Отправить»)\n"
     "/course <url> | <указания> — то же с указаниями на этот курс, например «только тесты»\n"
+    "/course <url> | домены: a.com, b.org — переходить только на них и на домен курса\n"
     "/text <задание> — новая задача текстом\n"
     "/status — текущая задача\n"
     "/stop — остановить: курс — на паузу (второй /stop — отмена), задачу — отменить\n"
@@ -95,8 +97,11 @@ def build_router(orch: Orchestrator, owner_id: int) -> Router:
             await message.answer("Пришли ссылку на курс: /course <url> или /course <url> | <указания>")
             return
         task = await orch.submit_course(m.group(0), instructions)
-        if instructions.strip():
-            await message.answer(f"Курс #{task.id}: указания приняты — «{clip(instructions.strip(), 300)}».")
+        _, extra, domains = split_course_input(task.input)
+        if domains:
+            await message.answer(f"Курс #{task.id}: переходить можно только на домен курса и {', '.join(domains)}.")
+        if extra:
+            await message.answer(f"Курс #{task.id}: указания приняты — «{clip(extra, 300)}».")
         if task.state == State.QUEUED:
             await message.answer(f"Курс #{task.id} в очереди — сейчас выполняется другая задача.")
 

@@ -45,7 +45,7 @@
     if (tag === 'select') return 'select';
     if (tag === 'textarea' || el.isContentEditable) return 'textarea';
     if (tag === 'input') {
-      if (type === 'checkbox' || type === 'radio' || type === 'file') return type;
+      if (type === 'checkbox' || type === 'radio' || type === 'file' || type === 'password') return type;
       if (['submit', 'button', 'image', 'reset'].includes(type)) return 'button';
       return 'text';
     }

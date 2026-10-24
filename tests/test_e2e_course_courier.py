@@ -15,7 +15,7 @@ from tests.lms_server import LMS_PASSWORD, LMS_USER, lms, reset, stats  # noqa: 
 
 pytestmark = pytest.mark.e2e
 
-TRAPS = ("Выйти", "Профиль", "Форум курса", "Полезные материалы", "Удалить аккаунт")
+TRAPS = ("Выйти", "Профиль", "Форум курса", "Удалить аккаунт")
 
 
 @pytest.fixture
@@ -81,7 +81,7 @@ async def test_overlay_numbers_match_screenshot_and_list(courier, tmp_path):
     assert by_label["Профиль"].blocked == "deny"
     assert by_label["Форум курса"].blocked == "deny"
     assert by_label["Удалить аккаунт"].blocked == "deny"
-    assert by_label["Полезные материалы"].blocked == "offsite"
+    assert not by_label["Полезные материалы"].blocked and by_label["Полезные материалы"].external
     assert not by_label["Продолжить курс"].blocked and not by_label["Продолжить курс"].submit
     assert all("example.org" not in e.for_worker() for e in screen.elements)
 
@@ -154,16 +154,18 @@ async def test_traps_never_fire(courier, tmp_path, lms):
     assert stats(lms)["traps"] == {"logout": 0, "profile": 0, "forum": 0, "delete": 0}
 
 
-async def test_offsite_navigation_blocked_and_rolled_back(courier, tmp_path, lms):
+async def test_local_address_blocked_and_rolled_back(courier, tmp_path, lms):
     browser = courier.browser
-    other = lms.replace("127.0.0.1", "localhost") + "/course"  # тот же сервер, другой origin
+    other = lms.replace("127.0.0.1", "localhost") + "/course"  # тот же сервер, но не origin курса — локальный адрес
     await browser.page.evaluate("(u) => { location.href = u }", other)
     await browser.page.wait_for_timeout(300)
-    assert browser.page.url == lms + "/course" and browser.offsite_attempts == [other]
+    assert browser.page.url == lms + "/course"
+    assert any("localhost" in n and "локальный адрес" in n for n in browser.take_notes())
 
-    # если всё же ушли (например, редирект) — откат на последнюю страницу курса
+    # без маршрута кода — закрывает прокси (403), вкладка откатывается на страницу курса
     await browser.context.unroute("**/*")
     await browser.page.goto(other)
+    assert "адрес закрыт" in await browser.page.inner_text("body")
     assert (await browser.check_domain()).startswith(other.rsplit("/", 1)[0])
     assert browser.page.url == lms + "/course"
 

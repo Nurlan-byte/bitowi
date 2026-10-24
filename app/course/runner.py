@@ -21,6 +21,8 @@ from app.config import Settings
 from app.course.browser import CourseBrowser
 from app.course.courier import Courier, Executor
 from app.course.models import Action, ActionResult, Screen
+from app.browser.session import is_login_url
+from app.course.netpolicy import host_port, split_course_input
 from app.course.policy import plan_actions
 from app.course.worker_input import StepLog, banned_words, copy_shots, load_rules, render
 from app.db import Database, Task
@@ -57,15 +59,11 @@ class Sessions(Protocol):
     async def ensure_session(self, profile, url: str) -> Path | None: ...
 
 
-def split_input(text: str) -> tuple[str, str]:
-    """«url | указания» → (url, указания на этот курс)."""
-    url, _, instructions = text.partition("|")
-    return url.strip(), instructions.strip()
-
-
-def new_state(url: str, instructions: str = "") -> dict[str, Any]:
+def new_state(url: str, instructions: str = "", domains: list[str] | None = None) -> dict[str, Any]:
     return {
-        "url": url, "last_url": url, "instructions": instructions, "title": "", "progress": "", "score": "",
+        "url": url, "last_url": url, "instructions": instructions,
+        # «домены:» из команды — куда можно переходить; external — где вкладка уже была
+        "domains": domains or [], "external": [], "title": "", "progress": "", "score": "",
         "step": 0, "submits": 0, "runtime": 0.0,
         "page_url": "", "page_steps": 0, "screen_hash": "", "same_screen": 0,
         "remarks": [], "history": [], "last_results": [], "notes": [],
@@ -115,7 +113,7 @@ class CourseRunner:
     async def start(self, task: Task) -> None:
         self.workspace(task.id).mkdir(parents=True, exist_ok=True)
         self.boss_dir(task.id).mkdir(parents=True, exist_ok=True)
-        await self.db.save_course(task.id, new_state(*split_input(task.input)))
+        await self.db.save_course(task.id, new_state(*split_course_input(task.input)))
 
     async def close(self) -> None:
         if self.browser:
@@ -129,14 +127,20 @@ class CourseRunner:
 
     async def _open(self, task: Task, st: dict[str, Any]) -> bool:
         """Make sure the browser for this task is up. True if it was (re)opened just now."""
+        # курсы, начатые до политики доменов
+        st.setdefault("domains", [])
+        st.setdefault("external", [])
         if self.browser and self.task_id == task.id:
             return False
         await self.close()
         url = st["last_url"] or st["url"]
         storage = None
         if self.sessions:
-            storage = await self.sessions.ensure_session(profile_for(st["url"], self.settings), url)
-        browser = CourseBrowser(self.settings, url, self.boss_dir(task.id) / "profile", storage)
+            storage = await self.sessions.ensure_session(profile_for(st["url"], self.settings), st["url"])
+        browser = CourseBrowser(
+            self.settings, url, self.boss_dir(task.id) / "profile", storage,
+            course_url=st["url"], domains=st.get("domains", []), visited=st.get("external", []),
+        )
         await browser.start()
         run_dir = self.run_dir(task.id)
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -188,6 +192,7 @@ class CourseRunner:
 
             screen = await self.courier.inspect(self.boss_dir(task.id) / "screens")
             await self._track(task, st, screen)
+            await self._login_wall(task, st, screen)
             shots = copy_shots(screen, ws)
             results = [ActionResult.model_validate(r) for r in st["last_results"]]
             history = [StepLog.model_validate(h) for h in st["history"]]
@@ -232,13 +237,15 @@ class CourseRunner:
             )
             res = await self.courier.execute(plan.run)
             results = plan.rejected + res.results
+            await self._net(task, st, notes)
             if res.offsite:
                 await self._after(task, st, screen, decision, results, notes)
-                raise CoursePause("offsite", "курьер ушёл с домена курса — вернул назад. Продолжить — /resume")
+                raise CoursePause("forbidden", "вкладка попала на запрещённый адрес (локальная сеть) — вернул назад. Продолжить — /resume")
 
             if plan.pending_submit and (auto or self.settings.auto_submit):
                 sub = await self.courier.execute(plan.pending_submit, allow_submit=True)
                 results += sub.results
+                await self._net(task, st, notes)
                 if auto:
                     st["grant"] -= 1
                 else:
@@ -246,7 +253,7 @@ class CourseRunner:
                     st["grant"] = SUBMIT_FLOW_STEPS
                 if sub.offsite:
                     await self._after(task, st, screen, decision, results, notes)
-                    raise CoursePause("offsite", "курьер ушёл с домена курса — вернул назад. Продолжить — /resume")
+                    raise CoursePause("forbidden", "вкладка попала на запрещённый адрес (локальная сеть) — вернул назад. Продолжить — /resume")
             elif plan.pending_submit:
                 await self._after(task, st, screen, decision, results, notes)
                 await self._preview(task, st, screen, plan.pending_submit, decision.answers)
@@ -258,6 +265,33 @@ class CourseRunner:
                                  "добавь её нажатие последним действием.")
             await self._after(task, st, screen, decision, results, notes)
             await self._check_failures(task, st, results)
+
+    async def _net(self, task: Task, st: dict[str, Any], notes: list[str]) -> None:
+        """Network policy after the courier: refusals → worker notes, new external domains, the limit."""
+        notes += self.browser.take_notes()
+        new = [d for d in self.browser.external_domains if d not in st["external"]]
+        if new:
+            st["external"] += new
+            await self.db.add_event(task.id, "course_domains", new)
+            self._journal_line(task, {"step": st["step"], "status": "domains", "new": new})
+        if self.browser.limit_hit:
+            host, self.browser.limit_hit = self.browser.limit_hit, ""
+            await self._save(task, st)
+            raise CoursePause("domain_limit", f"курс ведёт на {host} — сверх лимита внешних доменов "
+                                              f"({self.settings.course_max_external_domains}, уже: {', '.join(st['external'])}). "
+                                              "Подскажи ответом, как продолжить, и /resume")
+
+    async def _login_wall(self, task: Task, st: dict[str, Any], screen: Screen) -> None:
+        """A login page: outside the course domain the bot is never logged in; on it — the session expired."""
+        if not (is_login_url(screen.url) or any(e.kind == "password" for e in screen.elements)):
+            return
+        await self._save(task, st)
+        host = host_port(screen.url)[0]
+        if screen.external:
+            raise CoursePause("login_external", f"на {host} нужен вход — бот там не залогинен (вход только на "
+                                                "домене курса). Подскажи ответом, как продолжить, и /resume")
+        raise CoursePause("login_course", f"на {host} просит вход — сессия курса истекла. Пришли state.json "
+                                          "(подпись — домен) и /resume")
 
     async def _check_failures(self, task: Task, st: dict[str, Any], results: list[ActionResult]) -> None:
         """Stuck by errors: steps in a row where not a single action worked (the screen may still change)."""
@@ -302,10 +336,11 @@ class CourseRunner:
         st["remarks"] = []
         st["last_results"] = [r.model_dump() for r in res.results]
         st["notes"] = []
+        await self._net(task, st, st["notes"])
         await self.db.add_event(task.id, "course_submit", {"ok": all(r.ok for r in res.results)})
         await self._save(task, st)
         if res.offsite:
-            raise CoursePause("offsite", "курьер ушёл с домена курса — вернул назад. Продолжить — /resume")
+            raise CoursePause("forbidden", "вкладка попала на запрещённый адрес (локальная сеть) — вернул назад. Продолжить — /resume")
 
     # --- помощники ---
     async def _track(self, task: Task, st: dict[str, Any], screen: Screen) -> None:
@@ -345,6 +380,8 @@ class CourseRunner:
         if st["progress"]:
             parts.append(f"прогресс {st['progress']}")
         parts.append(f"сдач: {st['submits']}")
+        if st.get("external"):
+            parts.append("внешние: " + ", ".join(st["external"]))
         if st["score"]:
             parts.append(f"последний результат: {st['score']}")
         return " · ".join(parts)
@@ -359,6 +396,8 @@ class CourseRunner:
             lines.append(f"Прогресс: {st['progress']}")
         if st["score"]:
             lines.append(f"Последний результат: {st['score']}")
+        if st.get("external"):
+            lines.append("Внешние сайты: " + ", ".join(st["external"]))
         return "\n".join(lines)
 
     async def _preview(
@@ -403,6 +442,11 @@ class CourseRunner:
             "errors": exc.errors, "replies": files, "reply_chars": [len(r) for r in exc.replies],
             "elements": len(screen.elements),
         }
+        with (self.boss_dir(task.id) / "journal.jsonl").open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    def _journal_line(self, task: Task, entry: dict[str, Any]) -> None:
+        entry = {"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"), **entry}
         with (self.boss_dir(task.id) / "journal.jsonl").open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 

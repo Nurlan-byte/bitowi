@@ -1,7 +1,9 @@
 // Защита страницы. Регулярки и режим подставляет app/browser/guard.py (один источник с кодом).
 //   extract — шаг извлечения: блокирует кнопки сдачи, проверки, «Показать ответ» и сброс;
-//   course  — режим курса: ещё чёрный список (выход, профиль, удаление, форум…) и ссылки на чужой
-//             домен; сдача — только по одноразовому разрешению оркестратора в sessionStorage.
+//   course  — режим курса: ещё чёрный список (выход, профиль, удаление, форум…), локальные адреса,
+//             file:, скачивание; сдача — только по одноразовому разрешению оркестратора в sessionStorage.
+//             На чужом домене (не сайт курса) по разрешению — любая отправка формы. Остальные сайты открыты:
+//             сетевую политику держат маршрут и прокси браузера курса.
 (() => {
   const POLICY = __BITOWI_POLICY__;
   if (window.__bitowiGuard) return;
@@ -35,14 +37,34 @@
     return a ? a.href : '';
   };
 
-  const offsite = (href) => {
+  // локальный адрес по записи (имя, IP); после DNS то же проверяет прокси
+  const PRIVATE_V4 = /^(127\.|10\.|0\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.)/;
+  const PRIVATE_V6 = /^\[(::1?|::ffff:|f[cd][0-9a-f]{0,2}:|fe[89ab][0-9a-f]?:)/i;
+  const BAD_SCHEME = /^(file|chrome|chrome-extension|devtools|view-source|chrome-search):/i;
+  const forbiddenUrl = (href) => {
+    if (BAD_SCHEME.test(href)) return 'scheme';
     try {
       const u = new URL(href, location.href);
-      return /^https?:$/.test(u.protocol) && u.origin !== location.origin;
+      if (!/^(https?|wss?):$/.test(u.protocol)) return '';
+      const port = u.port || ({ 'https:': '443', 'wss:': '443' }[u.protocol] || '80');
+      if ((POLICY.exempt || []).includes(`${u.hostname.toLowerCase()}:${port}`)) return '';
+      const h = u.hostname.toLowerCase();
+      if (h === 'localhost' || h.endsWith('.localhost') || PRIVATE_V4.test(h) || PRIVATE_V6.test(h)) return 'private';
     } catch (e) {
-      return false;
+      return '';
     }
+    return '';
   };
+
+  // страница не на сайте курса — там по разрешению любая отправка формы
+  const site = (POLICY.course_site || '').toLowerCase();
+  const external = () => {
+    const h = location.hostname.toLowerCase();
+    return COURSE && site && !(h === site || h.endsWith('.' + site));
+  };
+  const formSubmitter = (el) =>
+    el && el.form && (el.matches('input[type=submit], input[type=image]') ||
+      (el.tagName === 'BUTTON' && (el.getAttribute('type') || 'submit').toLowerCase() === 'submit'));
 
   // причина запрета или '' — только в режиме курса
   const denied = (el) => {
@@ -50,7 +72,8 @@
     if (DENY.test(label(el))) return 'deny';
     const href = hrefOf(el);
     if (href && DENY_HREF.test(href)) return 'deny';
-    if (href && offsite(href)) return 'offsite';
+    if (href && forbiddenUrl(href)) return forbiddenUrl(href);
+    if (el.closest && el.closest('a[download]')) return 'download';
     return '';
   };
 
@@ -80,7 +103,7 @@
     if (!el) return;
     const why = denied(el);
     if (why) return block(event, el, why);
-    if (isSubmit(el)) {
+    if (isSubmit(el) || (external() && formSubmitter(el))) {
       if (!DANGER.test(label(el)) && takeAllowance()) {
         el.__bitowiAllowed = true;  // submit этой же кнопки не тратит второе разрешение
         return;
@@ -95,7 +118,8 @@
       sub.__bitowiAllowed = false;
       return;
     }
-    if (sub && !isSubmit(sub) && !denied(sub)) return;
+    // на сайте курса формы навигации (Далее, Начать попытку) свободны; на чужом домене — только по разрешению
+    if (!external() && sub && !isSubmit(sub) && !denied(sub)) return;
     if (!sub && takeAllowance()) return;
     block(event, sub || event.target, sub ? 'submit' : 'form');
   }, true);
@@ -110,8 +134,8 @@
   if (COURSE) {
     const nativeOpen = window.open;
     window.open = function (url, ...rest) {
-      if (url && offsite(String(url))) {
-        console.warn('[bitowi-guard] заблокировано (offsite): window.open');
+      if (url && forbiddenUrl(String(url))) {
+        console.warn('[bitowi-guard] заблокировано (private): window.open');
         return null;
       }
       return nativeOpen.call(window, url, ...rest);

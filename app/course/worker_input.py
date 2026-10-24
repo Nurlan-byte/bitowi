@@ -154,6 +154,11 @@ def render(
         screen_lines.append("Скриншоты (сверху вниз): " + ", ".join(shots))
     if screen.more_below:
         screen_lines.append("Страница длиннее скриншотов — ниже есть ещё (scroll down).")
+    if not screen.rendered:
+        screen_lines.append("Страница не отрисовалась (белый экран): подожди шаг без действий или верни stuck.")
+    if screen.external:
+        screen_lines.append("Это внешний сайт (не домен курса): входа здесь нет, формы отправляются только "
+                            "после подтверждения владельца.")
     if screen.progress:
         screen_lines.append(f"Прогресс курса: {screen.progress}")
     if screen.messages:

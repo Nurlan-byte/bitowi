@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 
 from app.browser.guard import DENY_HREF_RE, DENY_RE, is_submit
 from app.course.models import Action, ActionPlan, ActionResult, Element
+from app.course.netpolicy import NetPolicy
 
 TYPEABLE = ("text", "textarea")
 SCROLL = ("up", "down")
@@ -23,8 +24,13 @@ def same_origin(url: str, origin: str) -> bool:
     return bool(origin) and origin_of(url) == origin.lower()
 
 
-def classify(el: Element, origin: str) -> Element:
-    """Mark forbidden and submit elements. Forbidden wins: such an element is never clicked."""
+def classify(el: Element, policy: NetPolicy | str) -> Element:
+    """Mark forbidden, submit and external elements. Forbidden wins: such an element is never clicked.
+
+    Links to other public sites are allowed (marked external); local addresses and file: are not.
+    """
+    if isinstance(policy, str):
+        policy = NetPolicy(policy)
     # варианты ответа и поля ввода по тексту не запрещаем: «Как удалить файл?» — это вопрос, не кнопка
     clickable = el.kind in ("button", "link", "other")
     blocked = ""
@@ -33,10 +39,11 @@ def classify(el: Element, origin: str) -> Element:
     elif el.href:
         if DENY_HREF_RE.search(el.href):
             blocked = "deny"
-        elif el.href.startswith(("http://", "https://")) and not same_origin(el.href, origin):
-            blocked = "offsite"
+        elif policy.literal_block(el.href):
+            blocked = "private"
+    external = bool(el.href) and el.href.startswith(("http://", "https://")) and not policy.is_course(el.href)
     submit = el.kind == "file" or (clickable and is_submit(el.label, el.submit_class))
-    return el.model_copy(update={"blocked": blocked, "submit": submit and not blocked})
+    return el.model_copy(update={"blocked": blocked, "submit": submit and not blocked, "external": external})
 
 
 def safe_upload_path(value: str, workspace: Path) -> Path | None:
@@ -64,6 +71,8 @@ def _check(action: Action, el: Element | None, workspace: Path) -> str:
         return f"элемент [{el.n}] недоступен"
     if el.disabled:
         return f"элемент [{el.n}] неактивен"
+    if action.action == "type" and el.kind == "password":
+        return f"элемент [{el.n}] — поле пароля, вводить нельзя"
     if action.action == "type" and el.kind not in TYPEABLE:
         return f"элемент [{el.n}] — не поле ввода"
     if action.action == "select" and el.kind != "select":

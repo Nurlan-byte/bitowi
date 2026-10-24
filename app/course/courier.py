@@ -138,15 +138,12 @@ class CodexExecutor(CodexAgent, Executor):
             task_dir.name, str(self.settings.courier_timeout), *cmd[1:],
         ]
 
-    def allowed_origins(self, browser: CourseBrowser) -> str:
-        extra = [o.strip() for o in self.settings.course_extra_origins.split(";") if o.strip()]
-        return ";".join([browser.origin, *extra])
-
     def mcp_args(self, browser: CourseBrowser, run_dir: Path) -> list[str]:
+        # --allowed-origins нет: он режет подресурсы с CDN (белый экран SPA). Сетевую политику держат
+        # маршрут и прокси браузера курса — они действуют и на клики курьера
         return [
             "--cdp-endpoint", browser.cdp_endpoint,
-            "--init-script", str(write_guard(run_dir / "guard.js", "course")),
-            "--allowed-origins", self.allowed_origins(browser),
+            "--init-script", str(write_guard(run_dir / "guard.js", "course", browser.policy)),
             "--no-webmcp",
             "--output-dir", str(run_dir / "mcp"),
             "--timeout-action", "10000",

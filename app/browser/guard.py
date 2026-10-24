@@ -57,8 +57,12 @@ def is_submit(label: str, submit_class: bool = False) -> bool:
     return bool(SUBMIT_RE.search(label)) and not NAV_RE.search(label)
 
 
-def guard_script(mode: Mode) -> str:
-    """guard.js with the patterns substituted; passed to add_init_script / --init-script."""
+def guard_script(mode: Mode, net=None) -> str:
+    """guard.js with the patterns substituted; passed to add_init_script / --init-script.
+
+    net — app.course.netpolicy.NetPolicy of the course mode: the course site (outside it any form
+    needs the owner's allowance) and the exceptions from the ban on local addresses.
+    """
     policy = {
         "mode": mode,
         "submit": SUBMIT,
@@ -68,13 +72,15 @@ def guard_script(mode: Mode) -> str:
         "deny_href": DENY_HREF,
         "submit_classes": SUBMIT_CLASSES,
         "allow_key": ALLOW_KEY,
+        "course_site": net.course_site if net else "",
+        "exempt": sorted(net.exempt) if net else [],
     }
     return GUARD_TEMPLATE.read_text(encoding="utf-8").replace(
         "__BITOWI_POLICY__", json.dumps(policy, ensure_ascii=False)
     )
 
 
-def write_guard(path: Path, mode: Mode) -> Path:
+def write_guard(path: Path, mode: Mode, net=None) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(guard_script(mode), encoding="utf-8")
+    path.write_text(guard_script(mode, net), encoding="utf-8")
     return path

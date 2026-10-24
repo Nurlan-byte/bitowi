@@ -12,6 +12,7 @@ import pytest
 
 from app.agents import runner
 from app.course.courier import COURIER_TOOLS, UPLOAD_TOOL, CodexExecutor
+from app.course.netpolicy import NetPolicy
 from tests.lms_server import lms  # noqa: F401 — фикстура мини-LMS
 
 # строка снапшота MCP: link "[3] Выйти" [ref=e12]
@@ -23,11 +24,11 @@ MCP_BIN = shutil.which("playwright-mcp", path=os.environ.get("PATH", "") + os.pa
 class FakeBrowser:
     origin = "https://lms.test"
     cdp_endpoint = "http://127.0.0.1:9333"
+    policy = NetPolicy("https://lms.test")
 
 
 def test_courier_command(settings, tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "resolve_bin", lambda name: name)
-    settings.course_extra_origins = "https://cdn.test; "
     ex = CodexExecutor(settings)
     cmd = ex.build_command(tmp_path / "run", FakeBrowser(), allow_upload=False)
     conf = {c.split("=", 1)[0]: c.split("=", 1)[1] for c in cmd if c.startswith("mcp_servers.")}
@@ -38,7 +39,8 @@ def test_courier_command(settings, tmp_path, monkeypatch):
         assert banned not in tools
     args = json.loads(conf["mcp_servers.playwright.args"])
     assert args[args.index("--cdp-endpoint") + 1] == "http://127.0.0.1:9333"
-    assert args[args.index("--allowed-origins") + 1] == "https://lms.test;https://cdn.test"
+    # --allowed-origins нет: он резал CDN (белый экран SPA); политику держат маршрут и прокси браузера
+    assert "--allowed-origins" not in args
     assert "--no-webmcp" in args and (tmp_path / "run" / "guard.js").exists()
     assert json.loads(conf["mcp_servers.playwright.cwd"]) == str(tmp_path / "run" / "uploads")
     assert cmd[-1] == "-" and 'web_search="disabled"' in cmd

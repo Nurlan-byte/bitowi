@@ -14,6 +14,7 @@ from app.agents import runner
 from app.agents.boss_codex import CODEX_LOCKDOWN, CodexBoss
 from app.course.courier import Courier, CodexExecutor, DirectExecutor, upload_dir
 from app.course.models import Action
+from app.course.netpolicy import NetPolicy
 
 WRAPPER = Path(__file__).resolve().parents[1] / "deploy" / "bitowi-courier-run"
 INSTALLED = Path("/usr/local/bin/bitowi-courier-run")
@@ -24,6 +25,7 @@ linux = pytest.mark.skipif(sys.platform == "win32" or not shutil.which("timeout"
 class FakeBrowser:
     origin = "https://lms.test"
     cdp_endpoint = "http://127.0.0.1:9333"
+    policy = NetPolicy("https://lms.test")
 
 
 @pytest.fixture(autouse=True)

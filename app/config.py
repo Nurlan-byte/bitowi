@@ -42,6 +42,13 @@ class Settings(BaseSettings):
     browser_timeout: int = 45
     max_questions: int = 15
 
+    # режим курса: курьер (Codex + Playwright MCP поверх браузера оркестратора)
+    courier_timeout: int = 300
+    course_max_shots: int = 4
+    course_viewport: str = "1280x900"
+    # доп. источники через «;» для --allowed-origins (CDN платформы), по умолчанию — только домен курса
+    course_extra_origins: str = ""
+
     # вход по форме (пароли модели не передаются — вход делает оркестратор)
     demo_moodle_host: str = "school.moodledemo.net"
     demo_moodle_user: str = ""

@@ -84,6 +84,7 @@ async def index(request: Request):
     if not logged_in(request):
         return need_login(request)
     links = "".join(f'<li><a href="/quiz/{i}">{html.escape(q["title"])}</a></li>' for i, q in QUIZZES.items())
+    links += '<li><a href="/course">Курс: Знакомство с Казахстаном</a></li>'
     return page("Мои курсы", f"<ul>{links}</ul>")
 
 
@@ -208,4 +209,11 @@ async def reset(request: Request):
     STATS.update(submit=0, show_answer=0, logins=0)
     ATTEMPTS.clear()
     SESSIONS.clear()
+    course.reset()
     return JSONResponse({"ok": True})
+
+
+# режим курса — отдельный модуль, использует page/STATS/SESSIONS отсюда
+from e2e.fake_lms import course  # noqa: E402
+
+app.include_router(course.router)

@@ -25,6 +25,8 @@ class Element(BaseModel):
     label: str = ""
     value: str = ""
     checked: bool | None = None
+    # варианты списка select
+    options: list[str] = []
     disabled: bool = False
     # только для оркестратора — воркеру не передаются
     href: str = ""
@@ -36,6 +38,8 @@ class Element(BaseModel):
         line = f"[{self.n}] {self.kind}" + (f": {self.label}" if self.label else "")
         if self.value:
             line += f" = {self.value!r}"
+        if self.options:
+            line += " — варианты: " + " | ".join(self.options)
         if self.checked is not None:
             line += " (отмечено)" if self.checked else " (не отмечено)"
         if self.disabled:
@@ -63,6 +67,8 @@ class Screen(BaseModel):
     # сообщения платформы: «верно/неверно», баллы
     messages: list[str] = []
     progress: str = ""
+    # страница длиннее снятых скриншотов — есть смысл прокрутить вниз
+    more_below: bool = False
     # только для оркестратора
     url: str = ""
     title: str = ""

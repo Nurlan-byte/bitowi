@@ -59,11 +59,67 @@ def _toml(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
-class CodexBoss(Boss):
+class CodexAgent:
+    """`codex exec` with a JSON answer: shared by the boss and the course courier."""
+
+    who = "Куратор"
+    out_name = "boss_last.txt"
+
     def __init__(self, settings: Settings, run=runner.run) -> None:
         self.settings = settings
         self._run = run
 
+    @property
+    def timeout(self) -> int:
+        return self.settings.boss_timeout
+
+    def codex_command(self, task_dir: Path, mcp: list[str] | None = None) -> list[str]:
+        cmd = [
+            runner.resolve_bin(self.settings.codex_bin),
+            "exec",
+            "--skip-git-repo-check",
+            "-C", str(task_dir),
+            "--sandbox", "read-only",
+            "--ephemeral",
+            "--color", "never",
+            "-o", str(task_dir / self.out_name),
+            "-c", 'web_search="disabled"',
+        ]
+        if mcp is not None:
+            cmd += [
+                "-c", f"mcp_servers.playwright.command={_toml(runner.resolve_bin(self.settings.playwright_mcp_bin))}",
+                "-c", f"mcp_servers.playwright.args={_toml(mcp)}",
+                "-c", 'mcp_servers.playwright.default_tools_approval_mode="approve"',
+            ]
+        return cmd
+
+    async def _call(self, task_dir: Path, prompt: str, cmd: list[str]) -> str:
+        task_dir.mkdir(parents=True, exist_ok=True)
+        out_file = task_dir / self.out_name
+        out_file.unlink(missing_ok=True)
+        res = await self._run(cmd, cwd=task_dir, timeout=self.timeout, stdin=prompt)
+        if res.returncode != 0:
+            text = res.stderr + res.stdout
+            if runner.looks_like_limit(text):
+                raise AgentLimit(text.strip()[-300:])
+            raise AgentError(f"{self.who}: код {res.returncode}: {text.strip()[-300:]}")
+        if out_file.exists():
+            return out_file.read_text(encoding="utf-8")
+        return res.stdout
+
+    async def ask_json(self, task_dir: Path, prompt: str, model: type[M], cmd: list[str]) -> M:
+        error = ""
+        for attempt in range(2):
+            raw = await self._call(task_dir, prompt if attempt == 0 else prompt + fill(FIX_JSON, error=error), cmd)
+            try:
+                return model.model_validate(parse_json(raw))
+            except (ValueError, ValidationError) as exc:
+                error = str(exc).splitlines()[0][:200]
+                log.warning("%s returned bad JSON (attempt %d): %s", self.who, attempt + 1, error)
+        raise BossBadJSON(f"{self.who} дважды вернул невалидный JSON: {error}")
+
+
+class CodexBoss(CodexAgent, Boss):
     def mcp_args(self, browser: BrowserOpts) -> list[str]:
         args = ["--headless", "--browser", "chromium", "--isolated", "--output-dir", str(browser.output_dir)]
         if browser.storage_state:
@@ -74,52 +130,8 @@ class CodexBoss(Boss):
         return args
 
     def build_command(self, task_dir: Path, browser: BrowserOpts | None = None) -> list[str]:
-        cmd = [
-            runner.resolve_bin(self.settings.codex_bin),
-            "exec",
-            "--skip-git-repo-check",
-            "-C", str(task_dir),
-            "--sandbox", "read-only",
-            "--ephemeral",
-            "--color", "never",
-            "-o", str(task_dir / "boss_last.txt"),
-            "-c", 'web_search="disabled"',
-        ]
-        if browser:
-            cmd += [
-                "-c", f"mcp_servers.playwright.command={_toml(runner.resolve_bin(self.settings.playwright_mcp_bin))}",
-                "-c", f"mcp_servers.playwright.args={_toml(self.mcp_args(browser))}",
-                "-c", 'mcp_servers.playwright.default_tools_approval_mode="approve"',
-            ]
-        cmd.append("-")
-        return cmd
+        return self.codex_command(task_dir, self.mcp_args(browser) if browser else None) + ["-"]
 
-    async def _call(self, task_dir: Path, prompt: str, browser: BrowserOpts | None) -> str:
-        task_dir.mkdir(parents=True, exist_ok=True)
-        out_file = task_dir / "boss_last.txt"
-        out_file.unlink(missing_ok=True)
-        res = await self._run(
-            self.build_command(task_dir, browser), cwd=task_dir, timeout=self.settings.boss_timeout, stdin=prompt
-        )
-        if res.returncode != 0:
-            text = res.stderr + res.stdout
-            if runner.looks_like_limit(text):
-                raise AgentLimit(text.strip()[-300:])
-            raise AgentError(f"Куратор: код {res.returncode}: {text.strip()[-300:]}")
-        if out_file.exists():
-            return out_file.read_text(encoding="utf-8")
-        return res.stdout
-
-    async def _ask_json(self, task_dir: Path, prompt: str, model: type[M], browser: BrowserOpts | None = None) -> M:
-        error = ""
-        for attempt in range(2):
-            raw = await self._call(task_dir, prompt if attempt == 0 else prompt + fill(FIX_JSON, error=error), browser)
-            try:
-                return model.model_validate(parse_json(raw))
-            except (ValueError, ValidationError) as exc:
-                error = str(exc).splitlines()[0][:200]
-                log.warning("boss returned bad JSON (attempt %d): %s", attempt + 1, error)
-        raise BossBadJSON(f"Куратор дважды вернул невалидный JSON: {error}")
 
     async def review(
         self, task_dir: Path, notebook_text: str, private: dict[str, Any], round_no: int, max_rounds: int
@@ -129,7 +141,7 @@ class CodexBoss(Boss):
             + "\n\n## Общий блокнот\n\n" + notebook_text
             + "\n\n## Твои служебные заметки\n\n" + json.dumps(private, ensure_ascii=False, indent=2)
         )
-        return await self._ask_json(task_dir, prompt, ReviewResult)
+        return await self.ask_json(task_dir, prompt, ReviewResult, self.build_command(task_dir))
 
     async def extract(self, task_dir: Path, url: str, browser: BrowserOpts) -> ExtractResult:
         assert browser.guard, "извлечение — только с блокировкой кнопок сдачи"
@@ -139,4 +151,4 @@ class CodexBoss(Boss):
             screens_dir=browser.output_dir,
             max_questions=self.settings.max_questions,
         )
-        return await self._ask_json(task_dir, prompt, ExtractResult, browser)
+        return await self.ask_json(task_dir, prompt, ExtractResult, self.build_command(task_dir, browser))

@@ -58,6 +58,7 @@ def prompts_dir(tmp_path):
         'Раунд {round} из {max_rounds}.\nВерни JSON: {"verdict": "accept | revise"}', encoding="utf-8"
     )
     (d / "boss_extract.md").write_text("Открой {url}, скриншот в {screens_dir}/extract.png, до {max_questions}.", encoding="utf-8")
+    (d / "course_courier.md").write_text("Выполни действия в браузере и опиши экран. Верни JSON.", encoding="utf-8")
     return d
 
 

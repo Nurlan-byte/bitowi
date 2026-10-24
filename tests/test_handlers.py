@@ -267,3 +267,13 @@ async def test_course_preview_message(db, settings, tmp_path):
         assert bot.sent[-1].reply_markup is not None
     finally:
         await bot.session.close()
+
+
+async def test_course_command_with_instructions(course_env):
+    orch = course_env[0]
+    replies = await send(course_env, "/course https://lms.example.kz/course/view.php?id=7 | только тесты, пропускай форумы")
+    task = (await orch.db.last_tasks(1))[0]
+    st = await orch.db.get_course(task.id)
+    assert st["url"] == "https://lms.example.kz/course/view.php?id=7"
+    assert st["instructions"] == "только тесты, пропускай форумы"
+    assert any("указания приняты" in r for r in replies)

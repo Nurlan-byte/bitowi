@@ -133,10 +133,11 @@ class Orchestrator:
     async def submit_url(self, url: str) -> Task:
         return await self._submit("url", url)
 
-    async def submit_course(self, url: str) -> Task:
+    async def submit_course(self, url: str, instructions: str = "") -> Task:
+        """/course url | указания: указания на этот курс уходят воркеру вместе с правилами."""
         if not self.course:
             raise RuntimeError("режим курса не настроен")
-        return await self._submit("course", url)
+        return await self._submit("course", url + (f" | {instructions.strip()}" if instructions.strip() else ""))
 
     async def _submit(self, kind: str, text: str) -> Task:
         task = await self.db.create_task(kind, text, State.QUEUED)

@@ -22,7 +22,7 @@ from app.course.browser import CourseBrowser
 from app.course.courier import Courier, Executor
 from app.course.models import Action, ActionResult, Screen
 from app.course.policy import plan_actions
-from app.course.worker_input import StepLog, banned_words, copy_shots, render
+from app.course.worker_input import StepLog, banned_words, copy_shots, load_rules, render
 from app.db import Database, Task
 
 log = logging.getLogger(__name__)
@@ -57,9 +57,15 @@ class Sessions(Protocol):
     async def ensure_session(self, profile, url: str) -> Path | None: ...
 
 
-def new_state(url: str) -> dict[str, Any]:
+def split_input(text: str) -> tuple[str, str]:
+    """«url | указания» → (url, указания на этот курс)."""
+    url, _, instructions = text.partition("|")
+    return url.strip(), instructions.strip()
+
+
+def new_state(url: str, instructions: str = "") -> dict[str, Any]:
     return {
-        "url": url, "last_url": url, "title": "", "progress": "", "score": "",
+        "url": url, "last_url": url, "instructions": instructions, "title": "", "progress": "", "score": "",
         "step": 0, "submits": 0, "runtime": 0.0,
         "page_url": "", "page_steps": 0, "screen_hash": "", "same_screen": 0,
         "remarks": [], "history": [], "last_results": [], "notes": [],
@@ -109,7 +115,7 @@ class CourseRunner:
     async def start(self, task: Task) -> None:
         self.workspace(task.id).mkdir(parents=True, exist_ok=True)
         self.boss_dir(task.id).mkdir(parents=True, exist_ok=True)
-        await self.db.save_course(task.id, new_state(task.input))
+        await self.db.save_course(task.id, new_state(*split_input(task.input)))
 
     async def close(self) -> None:
         if self.browser:
@@ -185,7 +191,9 @@ class CourseRunner:
             shots = copy_shots(screen, ws)
             results = [ActionResult.model_validate(r) for r in st["last_results"]]
             history = [StepLog.model_validate(h) for h in st["history"]]
-            text = render(screen, shots, results, history, st["remarks"], banned, st["notes"], workspace=ws)
+            # правила владельца перечитываются на каждом шаге — правки файла действуют без перезапуска
+            text = render(screen, shots, results, history, st["remarks"], banned, st["notes"], workspace=ws,
+                          rules=load_rules(self.settings.prompts_dir), instructions=st.get("instructions", ""))
             try:
                 decision = await self.worker.decide(text, ws)
             except WorkerBadJSON as exc:

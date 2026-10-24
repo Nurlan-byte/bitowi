@@ -178,3 +178,30 @@ async def test_failed_actions_in_a_row_pause(lms_settings, db, notifier, lms):
         assert (await db.get_course(task.id))["step"] == 3
     finally:
         await orch.course.close()
+
+
+async def test_rules_reread_every_step_and_course_instructions(lms_settings, db, notifier, lms):
+    from app.course.worker_input import DEFAULT_RULES, RULES_FILE
+
+    rules = lms_settings.prompts_dir / RULES_FILE
+    rules.unlink(missing_ok=True)
+
+    def first(text: str) -> Decision:
+        # владелец правит файл, пока курс идёт — без перезапуска
+        rules.write_text("- ПРАВИЛО-Б: только тесты.\n", encoding="utf-8")
+        return Decision(status="continue", comment="читаю")
+
+    worker = FakeWorker(decisions=[first, Decision(status="course_done")])
+    orch = make(lms_settings, db, notifier, worker)
+    try:
+        task = await orch.submit_course(lms + "/course", "пропускай форумы")
+        await orch.wait_idle()
+        assert await state(orch, task.id) == State.DONE
+        st = await db.get_course(task.id)
+        assert st["url"] == lms + "/course" and st["instructions"] == "пропускай форумы"
+        assert DEFAULT_RULES in worker.screens[0]  # файла нет — правила по умолчанию
+        assert "ПРАВИЛО-Б" in worker.screens[1] and DEFAULT_RULES not in worker.screens[1]
+        assert all("пропускай форумы" in s for s in worker.screens)
+    finally:
+        rules.unlink(missing_ok=True)
+        await orch.course.close()

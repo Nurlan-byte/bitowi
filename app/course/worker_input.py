@@ -2,6 +2,7 @@
 owner's remarks. No URLs, domain, platform name or link targets: the whole text goes through
 sanitize.for_course with the banned words below."""
 
+import re
 import shutil
 from pathlib import Path
 from urllib.parse import urlparse
@@ -11,7 +12,32 @@ from pydantic import BaseModel
 from app import sanitize
 from app.course.models import ActionResult, Screen
 
-GOAL = "Пройти учебный курс до конца: материалы, отметки просмотра, тесты, итоговый экзамен."
+GOAL = "Пройти учебный курс до конца по правилам прохождения ниже."
+
+# правила выбора заданий: PROMPTS_DIR/course_rules.md, читается на каждом шаге (правки — без перезапуска);
+# нет файла или он пустой — эти
+RULES_FILE = "course_rules.md"
+DEFAULT_RULES = """\
+- Идти по порядку курса: модуль за модулем, сверху вниз.
+- Материалы для чтения: открыть, при необходимости прокрутить до конца, перейти дальше.
+- Видео: отметить «просмотрено», если есть такая кнопка.
+- Тесты и задания с ответами: решить и сдать (сдача — только после подтверждения владельца).
+- Итоговый экзамен — после остальных элементов курса.
+- Уже пройденное (отмечено как выполненное) повторно не проходить.
+- Форумы, чаты, обсуждения, сообщения и внешние ссылки пропускать.
+- Тест проверен, есть ошибки и остались попытки — исправить ответы и сдать ещё раз; попыток нет — идти дальше.
+- Всё пройдено или прогресс 100% — курс пройден."""
+
+
+def load_rules(prompts_dir: Path) -> str:
+    """The owner's rules file, re-read on every step; missing or empty → DEFAULT_RULES."""
+    try:
+        text = (prompts_dir / RULES_FILE).read_text(encoding="utf-8")
+        # комментарии <!-- … --> — для владельца, воркеру не идут
+        text = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL).strip()
+    except OSError:
+        text = ""
+    return text or DEFAULT_RULES
 
 # названия платформ — воркеру не показываем, даже если они в тексте страницы. Только однозначные:
 # «Canvas», «Blackboard» встречаются в учебном тексте — их при нужде добавляют в COURSE_BANNED_WORDS
@@ -116,8 +142,12 @@ def render(
     banned: list[str],
     notes: list[str] = (),
     workspace: Path | None = None,
+    rules: str = DEFAULT_RULES,
+    instructions: str = "",
 ) -> str:
-    parts = [f"## Цель\n{GOAL}"]
+    parts = [f"## Цель\n{GOAL}", f"## Правила прохождения\n{rules.strip() or DEFAULT_RULES}"]
+    if instructions.strip():
+        parts.append(f"## Указания владельца на этот курс (важнее правил прохождения)\n{instructions.strip()}")
 
     screen_lines = ["## Экран"]
     if shots:

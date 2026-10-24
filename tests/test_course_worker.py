@@ -139,3 +139,22 @@ def test_split_lines():
     assert split_lines("a\nb\nc\n", 4) == ["a\nb\n", "c\n"]
     assert split_lines("x" * 10, 4) == ["xxxx", "xxxx", "xx"]
     assert split_lines("", 4) == [""]
+
+
+def test_rules_file_missing_empty_or_custom(tmp_path):
+    from app.course.worker_input import DEFAULT_RULES, RULES_FILE, load_rules
+
+    assert load_rules(tmp_path) == DEFAULT_RULES  # нет файла
+    (tmp_path / RULES_FILE).write_text("  \n\n", encoding="utf-8")
+    assert load_rules(tmp_path) == DEFAULT_RULES  # пустой
+    (tmp_path / RULES_FILE).write_text("<!-- как править: по пунктам -->\n", encoding="utf-8")
+    assert load_rules(tmp_path) == DEFAULT_RULES  # только комментарий
+    (tmp_path / RULES_FILE).write_text("<!-- для владельца -->\n- Только тесты.\n- Видео пропускать.\n", encoding="utf-8")
+    assert load_rules(tmp_path) == "- Только тесты.\n- Видео пропускать."
+
+
+def test_render_rules_and_course_instructions():
+    out = render(Screen(text="Модуль 1"), [], [], [], [], [], rules="- Только тесты.", instructions="пропускай форумы")
+    assert "## Правила прохождения\n- Только тесты." in out
+    assert "## Указания владельца на этот курс (важнее правил прохождения)\nпропускай форумы" in out
+    assert "Указания владельца" not in render(Screen(text="x"), [], [], [], [], [])

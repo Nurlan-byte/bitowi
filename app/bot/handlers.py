@@ -39,6 +39,7 @@ HELP = (
     "Команды:\n"
     "ссылка или /task <url> — задача со страницы (только извлечение)\n"
     "/course <url> — пройти курс (сдача — только после твоего «Отправить»)\n"
+    "/course <url> | <указания> — то же с указаниями на этот курс, например «только тесты»\n"
     "/text <задание> — новая задача текстом\n"
     "/status — текущая задача\n"
     "/stop — остановить: курс — на паузу (второй /stop — отмена), задачу — отменить\n"
@@ -87,11 +88,15 @@ def build_router(orch: Orchestrator, owner_id: int) -> Router:
 
     @owner.message(Command("course"))
     async def cmd_course(message: Message, command: CommandObject) -> None:
-        m = URL_RE.search(command.args or "")
+        # /course <url> | <указания на этот курс>
+        head, _, instructions = (command.args or "").partition("|")
+        m = URL_RE.search(head)
         if not m:
-            await message.answer("Пришли ссылку на курс: /course <url>")
+            await message.answer("Пришли ссылку на курс: /course <url> или /course <url> | <указания>")
             return
-        task = await orch.submit_course(m.group(0))
+        task = await orch.submit_course(m.group(0), instructions)
+        if instructions.strip():
+            await message.answer(f"Курс #{task.id}: указания приняты — «{clip(instructions.strip(), 300)}».")
         if task.state == State.QUEUED:
             await message.answer(f"Курс #{task.id} в очереди — сейчас выполняется другая задача.")
 

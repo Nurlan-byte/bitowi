@@ -38,3 +38,5 @@ def test_settings_repr_hides_secrets(settings):
     settings.fake_lms_password = "lms-secret"
     text = repr(settings) + str(settings)
     assert "SECRET-TOKEN" not in text and "moodle-secret" not in text and "lms-secret" not in text
+    settings.owner_id = 424242
+    assert "424242" not in repr(settings) and repr(settings) == "Settings(<скрыто>)"

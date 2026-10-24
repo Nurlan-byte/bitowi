@@ -83,6 +83,12 @@ class Settings(BaseSettings):
     def _empty_owner(cls, value: object) -> object:
         return 0 if value in ("", None) else value
 
+    def __repr__(self) -> str:
+        # значения из .env не печатаются нигде: вывод упавших тестов, логи, сообщения
+        return "Settings(<скрыто>)"
+
+    __str__ = __repr__
+
     @property
     def db_path(self) -> Path:
         return self.data_dir / "bitowi.db"

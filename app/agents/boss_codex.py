@@ -18,11 +18,10 @@ from app.agents.base import (
     ExtractResult,
     ReviewResult,
 )
+from app.browser.guard import write_guard
 from app.config import Settings
 
 log = logging.getLogger(__name__)
-
-GUARD_JS = Path(__file__).resolve().parent.parent / "browser" / "guard.js"
 
 _FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE)
 
@@ -70,7 +69,8 @@ class CodexBoss(Boss):
         if browser.storage_state:
             args += ["--storage-state", str(browser.storage_state)]
         if browser.guard:
-            args += ["--init-script", str(GUARD_JS)]
+            # регулярки подставлены в скрипт — кладём готовый файл рядом со скриншотами
+            args += ["--init-script", str(write_guard(browser.output_dir / "guard.js", "extract"))]
         return args
 
     def build_command(self, task_dir: Path, browser: BrowserOpts | None = None) -> list[str]:

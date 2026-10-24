@@ -11,7 +11,7 @@ pytest.importorskip("uvicorn")
 
 from playwright.async_api import async_playwright  # noqa: E402
 
-from app.agents.boss_codex import GUARD_JS  # noqa: E402
+from app.browser.guard import guard_script  # noqa: E402
 from app.browser.session import BrowserSessions, LoginFailed, SessionExpired  # noqa: E402
 from app.browser.sites import SiteProfile, profile_for  # noqa: E402
 from tests.lms_server import LMS_PASSWORD, LMS_USER, lms, reset, stats  # noqa: E402,F401
@@ -70,7 +70,7 @@ async def _page(lms_settings, lms, guard: bool):
     browser = await pw.chromium.launch(headless=True)
     ctx = await browser.new_context(storage_state=str(state))
     if guard:
-        await ctx.add_init_script(path=str(GUARD_JS))
+        await ctx.add_init_script(script=guard_script("extract"))
     page = await ctx.new_page()
     await page.goto(url)
     return pw, browser, page
@@ -112,7 +112,7 @@ async def test_guard_allows_navigation_and_login(lms_settings, lms):
     browser = await pw.chromium.launch(headless=True)
     try:
         ctx = await browser.new_context()
-        await ctx.add_init_script(path=str(GUARD_JS))
+        await ctx.add_init_script(script=guard_script("extract"))
         page = await ctx.new_page()
         await page.goto(lms + "/quiz/2")
         await page.fill("input[name=username]", LMS_USER)

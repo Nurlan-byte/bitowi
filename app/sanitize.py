@@ -40,24 +40,41 @@ _SCORE_RE = re.compile(
 )
 
 
+# показанный платформой правильный ответ — строка целиком: «Правильный ответ: 7», «The correct answer is: 7»
+_SHOWN_ANSWER_RE = re.compile(
+    r"^[ \t]*(?:правильн\w* ответ\w*|верн\w* ответ\w*|(?:the )?correct answers?(?: is| are)?|right answers?)"
+    r"[ \t]*[:：][^\n]*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
 def _collapse(text: str) -> str:
     text = re.sub(r"[ \t]+\n", "\n", text)
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
-def for_worker(text: str, banned: Iterable[str] = ()) -> str:
-    """Strip URLs, service tags and banned words (e.g. platform name) before the worker sees text."""
+def _strip_sources(text: str, banned: Iterable[str]) -> str:
     text = _TAG_BLOCK_RE.sub("", text)
     text = _TAG_RE.sub("", text)
     text = _URL_RE.sub("[ссылка удалена]", text)
     text = _DOMAIN_RE.sub("[ссылка удалена]", text)
-    text = _GRADE_MARKS_RE.sub("", text)
-    text = _GRADE_LINE_RE.sub("", text)
-    text = _SCORE_RE.sub("", text)
     for word in banned:
         if word and word.strip():
             text = re.sub(re.escape(word.strip()), "[…]", text, flags=re.IGNORECASE)
-    return _collapse(text)
+    return text
+
+
+def for_worker(text: str, banned: Iterable[str] = ()) -> str:
+    """Strip URLs, service tags and banned words (e.g. platform name) before the worker sees text."""
+    text = _GRADE_MARKS_RE.sub("", text)
+    text = _GRADE_LINE_RE.sub("", text)
+    text = _SCORE_RE.sub("", text)
+    return _collapse(_strip_sources(text, banned))
+
+
+def for_course(text: str, banned: Iterable[str] = ()) -> str:
+    """Course mode: grades stay (needed for retries), answers shown by the platform go."""
+    return _collapse(_strip_sources(_SHOWN_ANSWER_RE.sub("", text), banned))
 
 
 def for_boss(text: str) -> str:

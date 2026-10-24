@@ -66,6 +66,8 @@ async def test_course_passes_with_three_confirmations(lms_settings, db, notifier
         assert s["quiz_checks"] == 2 and s["exam_submits"] == 1
         assert s["traps"] == NO_TRAPS
         assert "Курс #" in notifier.messages[-1] and "сдач: 3" in notifier.messages[-1]
+        # новый результат на экране — скриншот владельцу: два теста и экзамен
+        assert len(notifier.photos) == 3 and all(p.exists() for p in notifier.photos)
 
         # страница с текстом «нажми Выйти»: воркер поддался, код не пустил
         assert bot.tried_trap
@@ -157,5 +159,22 @@ async def test_step_limit_and_stuck_status_pause(lms_settings, db, notifier, lms
         await orch.wait_idle()
         assert await state(orch, task.id) == State.PAUSED
         assert "нет кнопки «Далее»" in notifier.statuses[-1]
+    finally:
+        await orch.course.close()
+
+
+async def test_failed_actions_in_a_row_pause(lms_settings, db, notifier, lms):
+    lms_settings.course_fail_repeats = 3
+    # воркер жмёт номер, которого нет: экран не меняется, но застревание видно по ошибкам
+    miss = Decision(status="continue", actions=[{"action": "click", "element": 999}])
+    lms_settings.course_stuck_repeats = 10
+    orch = make(lms_settings, db, notifier, FakeWorker(decisions=[miss] * 10))
+    try:
+        task = await orch.submit_course(lms + "/course")
+        await orch.wait_idle()
+        assert await state(orch, task.id) == State.PAUSED
+        assert "3 шага подряд не выполнено ни одно действие" in notifier.statuses[-1]
+        assert "элемент [999] не найден" in notifier.statuses[-1]
+        assert (await db.get_course(task.id))["step"] == 3
     finally:
         await orch.course.close()

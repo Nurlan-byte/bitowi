@@ -7,12 +7,25 @@
   ].join(', ');
   const BOX = '__bitowi_overlay';
 
-  // прошлая разметка: вернуть исходные aria-label
+  // атрибут меняем, исходное значение — в data-атрибут; при следующем осмотре возвращаем
+  const stash = (el, attr, keep, value) => {
+    el.setAttribute(keep, el.getAttribute(attr) || '');
+    if (value === null) el.removeAttribute(attr); else el.setAttribute(attr, value);
+  };
+  const restore = (el, attr, keep) => {
+    if (!el.hasAttribute(keep)) return;
+    const value = el.getAttribute(keep);
+    if (value) el.setAttribute(attr, value); else el.removeAttribute(attr);
+    el.removeAttribute(keep);
+  };
+
+  // прошлая разметка: вернуть исходные aria-label, aria-labelledby, role, aria-checked
   document.getElementById(BOX)?.remove();
   document.querySelectorAll('[data-bitowi-n]').forEach((el) => {
-    const aria = el.getAttribute('data-bitowi-aria');
-    if (aria) el.setAttribute('aria-label', aria); else el.removeAttribute('aria-label');
-    el.removeAttribute('data-bitowi-aria');
+    restore(el, 'aria-label', 'data-bitowi-aria');
+    restore(el, 'aria-labelledby', 'data-bitowi-labelledby');
+    restore(el, 'role', 'data-bitowi-role');
+    restore(el, 'aria-checked', 'data-bitowi-checked');
     el.removeAttribute('data-bitowi-n');
   });
 
@@ -41,8 +54,18 @@
     return 'other';
   };
 
+  // Moodle: у radio aria-labelledby на div с текстом варианта
+  const labelledBy = (el) => (el.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean)
+    .map((id) => document.getElementById(id)).filter(Boolean);
+
+  // скрытый radio/checkbox (оформленный переключатель): кликают по его подписи
+  const proxyFor = (input) => {
+    const candidates = [...(input.labels || []), input.closest('label'), ...labelledBy(input)];
+    return candidates.find((c) => c && visible(c) && !c.hasAttribute('data-bitowi-n')) || null;
+  };
+
   const labelOf = (el, kind) => {
-    const parts = [el.getAttribute('aria-label')];
+    const parts = [el.getAttribute('aria-label'), ...labelledBy(el).map((l) => l.innerText)];
     if (el.labels && el.labels.length) parts.push([...el.labels].map((l) => l.innerText).join(' '));
     else if (el.closest('label')) parts.push(el.closest('label').innerText);
     if (!['text', 'textarea', 'select'].includes(kind)) parts.push(el.innerText);
@@ -69,15 +92,28 @@
   const elements = [];
   let n = 0;
   for (const el of document.querySelectorAll(SELECTOR)) {
-    if (el.closest('#' + BOX) || !visible(el)) continue;
-    // ссылка внутри кнопки и т.п. — нумеруем внешний элемент
-    if (el.parentElement && el.parentElement.closest('[data-bitowi-n]')) continue;
-    n += 1;
+    if (el.closest('#' + BOX)) continue;
     const kind = kindOf(el);
+    // target — что нумеруем и по чему кликают: сам элемент или подпись скрытого переключателя
+    let target = el;
+    if (!visible(el)) {
+      if (kind !== 'radio' && kind !== 'checkbox') continue;
+      target = proxyFor(el);
+      if (!target) continue;
+    }
+    if (target.hasAttribute('data-bitowi-n')) continue;
+    // ссылка внутри кнопки и т.п. — нумеруем внешний элемент
+    if (target.parentElement && target.parentElement.closest('[data-bitowi-n]')) continue;
+    n += 1;
     const label = labelOf(el, kind);
-    el.setAttribute('data-bitowi-n', String(n));
-    el.setAttribute('data-bitowi-aria', el.getAttribute('aria-label') || '');
-    el.setAttribute('aria-label', `[${n}] ${label}`.trim());
+    target.setAttribute('data-bitowi-n', String(n));
+    // номер — в доступном имени; aria-labelledby важнее aria-label, поэтому его убираем на время
+    stash(target, 'aria-label', 'data-bitowi-aria', `[${n}] ${label}`.trim());
+    if (target.hasAttribute('aria-labelledby')) stash(target, 'aria-labelledby', 'data-bitowi-labelledby', null);
+    if (target !== el) {
+      stash(target, 'role', 'data-bitowi-role', kind);
+      stash(target, 'aria-checked', 'data-bitowi-checked', String(!!el.checked));
+    }
 
     let value = '';
     let options = [];
@@ -99,7 +135,7 @@
     });
 
     // бейдж — canvas: нарисованный номер не попадает ни в дерево доступности (снапшот MCP), ни в innerText
-    const r = el.getBoundingClientRect();
+    const r = target.getBoundingClientRect();
     const label_ = `[${n}]`;
     const badge = document.createElement('canvas');
     const w = 8 * label_.length + 6;

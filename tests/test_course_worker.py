@@ -113,3 +113,29 @@ async def test_fake_worker_decisions(tmp_path):
     assert (await w.decide("экран 2", tmp_path)).comment == "экран"
     assert (await w.decide("экран 3", tmp_path)).status == "stuck"
     assert w.screens == ["экран 1", "экран 2", "экран 3"]
+
+
+def test_long_text_and_elements_go_in_parts(tmp_path):
+    from app.course import worker_input
+
+    ws = tmp_path / "ws"
+    questions = "".join(f"Вопрос {i}. Тип реакции? Подробнее: https://school.moodledemo.net/q/{i}\n" for i in range(1, 900))
+    els = [Element(n=i, kind="radio", label=f"вариант {i}") for i in range(1, 1500)]
+    out = render(Screen(text=questions, elements=els), [], [], [], [], banned_words(ORIGIN), workspace=ws)
+    text_files = sorted((ws / "screens").glob("text-*.md"))
+    el_files = sorted((ws / "screens").glob("elements-*.md"))
+    assert len(text_files) >= 2 and len(el_files) >= 2
+    assert "### Текст страницы (часть 1 из" in out and "screens/text-2.md" in out
+    assert "### Элементы (часть 1 из" in out and "screens/elements-2.md" in out
+    whole = "".join(p.read_text(encoding="utf-8") for p in text_files)
+    assert "Вопрос 899." in whole and "moodledemo" not in whole and "https" not in whole  # ничего не потеряно, всё отфильтровано
+    assert "[1499] radio: вариант 1499" in "".join(p.read_text(encoding="utf-8") for p in el_files)
+    assert len(out) < worker_input.MAX_TEXT + worker_input.MAX_ELEMENTS + 5000
+
+
+def test_split_lines():
+    from app.course.worker_input import split_lines
+
+    assert split_lines("a\nb\nc\n", 4) == ["a\nb\n", "c\n"]
+    assert split_lines("x" * 10, 4) == ["xxxx", "xxxx", "xx"]
+    assert split_lines("", 4) == [""]

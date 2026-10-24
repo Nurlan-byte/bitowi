@@ -9,6 +9,7 @@ import hashlib
 import json
 import logging
 import re
+import shutil
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,7 +33,7 @@ SUBMIT_FLOW_STEPS = 2
 # больше за шаг не выполняем: остальное — следующим шагом (большие тесты на 25+ вопросов)
 MAX_ACTIONS_PER_STEP = 60
 
-_SCORE_RE = re.compile(r"(?:балл\w*|оценка|mark|grade|score)\s*:?\s*\d+(?:[.,]\d+)?\s*(?:из|/|out of)\s*\d+(?:[.,]\d+)?",
+_SCORE_RE = re.compile(r"(?:балл\w*|оценка|сдан\w*|итог\w*|mark|grade|score)\s*:?\s*\d+(?:[.,]\d+)?\s*(?:из|/|out of)\s*\d+(?:[.,]\d+)?",
                        re.IGNORECASE)
 
 
@@ -48,6 +49,7 @@ class CoursePause(Exception):
 class CourseNotifier(Protocol):
     async def status(self, task: Task, text: str) -> None: ...
     async def message(self, task: Task, text: str) -> None: ...
+    async def photo(self, task: Task, path: Path, caption: str) -> None: ...
     async def course_preview(self, task: Task, shots: list[Path], answers: list[str], button: str) -> None: ...
 
 
@@ -61,7 +63,7 @@ def new_state(url: str) -> dict[str, Any]:
         "step": 0, "submits": 0, "runtime": 0.0,
         "page_url": "", "page_steps": 0, "screen_hash": "", "same_screen": 0,
         "remarks": [], "history": [], "last_results": [], "notes": [],
-        "pending": None, "grant": 0,
+        "pending": None, "grant": 0, "fail_steps": 0,
     }
 
 
@@ -166,6 +168,8 @@ class CourseRunner:
         run_steps = 0
         banned = banned_words(self.browser.origin, self.settings.course_banned_words)
         ws = self.workspace(task.id)
+        # новый запуск (/resume после подсказки) — счёт неудачных шагов заново
+        st["fail_steps"] = 0
 
         while True:
             st["runtime"] = base_runtime + time.monotonic() - started
@@ -181,7 +185,7 @@ class CourseRunner:
             shots = copy_shots(screen, ws)
             results = [ActionResult.model_validate(r) for r in st["last_results"]]
             history = [StepLog.model_validate(h) for h in st["history"]]
-            text = render(screen, shots, results, history, st["remarks"], banned, st["notes"])
+            text = render(screen, shots, results, history, st["remarks"], banned, st["notes"], workspace=ws)
             try:
                 decision = await self.worker.decide(text, ws)
             except WorkerBadJSON as exc:
@@ -245,6 +249,20 @@ class CourseRunner:
                     notes.append("Статус submit_ready, но среди действий нет кнопки сдачи — "
                                  "добавь её нажатие последним действием.")
             await self._after(task, st, screen, decision, results, notes)
+            await self._check_failures(task, st, results)
+
+    async def _check_failures(self, task: Task, st: dict[str, Any], results: list[ActionResult]) -> None:
+        """Stuck by errors: steps in a row where not a single action worked (the screen may still change)."""
+        if not results:
+            return
+        if any(r.ok for r in results):
+            st["fail_steps"] = 0
+            return
+        st["fail_steps"] = st.get("fail_steps", 0) + 1
+        if st["fail_steps"] >= self.settings.course_fail_repeats:
+            await self._save(task, st)
+            raise CoursePause("fail_steps", f"{st['fail_steps']} шага подряд не выполнено ни одно действие "
+                                            f"(«{results[0].error[:120]}»). Подскажи ответом на это сообщение и /resume")
 
     async def submit(self, task: Task) -> None:
         """After the owner's «Отправить»: the courier presses the pending submit buttons."""
@@ -293,6 +311,14 @@ class CourseRunner:
         st["title"] = screen.title
         st["progress"] = screen.progress or st["progress"]
         score = next((m.group(0) for m in map(_SCORE_RE.search, [*screen.messages, screen.text]) if m), "")
+        key = f"{screen.url}|{score}"
+        if score and key != st.get("score_key") and screen.shots:
+            # новый результат на экране — скриншот владельцу и в папку задачи (разбор оценок)
+            saved = self.boss_dir(task.id) / "results" / f"step{st['step'] + 1}.png"
+            saved.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(screen.shots[0], saved)
+            await self.notifier.photo(task, saved, f"Курс #{task.id} · результат: {score}")
+            st["score_key"] = key
         st["score"] = score or st["score"]
         if st["same_screen"] >= self.settings.course_stuck_repeats:
             await self._save(task, st)

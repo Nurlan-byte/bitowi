@@ -22,6 +22,7 @@ KNOWN_PLATFORMS = (
 _COMMON_LABELS = {"www", "com", "net", "org", "edu", "kz", "ru", "io", "app", "dev", "lms", "school", "learn"}
 
 MAX_TEXT = 20_000
+MAX_ELEMENTS = 30_000
 HISTORY = 8
 
 
@@ -68,6 +69,44 @@ def _result_line(r: ActionResult) -> str:
     return f"- {what} — " + ("выполнено" if r.ok else f"не выполнено: {r.error}")
 
 
+def split_lines(text: str, limit: int) -> list[str]:
+    """Parts of at most `limit` chars, cut at line ends (a single huge line is cut as is)."""
+    parts, cur = [], ""
+    for line in text.splitlines(keepends=True):
+        while len(line) > limit:
+            if cur:
+                parts.append(cur)
+                cur = ""
+            parts.append(line[:limit])
+            line = line[limit:]
+        if len(cur) + len(line) > limit:
+            parts.append(cur)
+            cur = ""
+        cur += line
+    if cur or not parts:
+        parts.append(cur)
+    return parts
+
+
+def _in_parts(title: str, body: str, limit: int, name: str, workspace: Path | None, banned: list[str]) -> str:
+    """Short body inline; a long one — the first part inline, all parts as files in workspace/screens."""
+    chunks = split_lines(body, limit)
+    if len(chunks) == 1:
+        return f"### {title}\n{chunks[0].strip() or '—'}"
+    if workspace is None:
+        return f"### {title}\n{chunks[0].strip()}\n…(обрезано)"
+    (workspace / "screens").mkdir(parents=True, exist_ok=True)
+    files = []
+    for i, chunk in enumerate(chunks, 1):
+        rel = f"screens/{name}-{i}.md"
+        (workspace / rel).write_text(sanitize.for_course(chunk, banned), encoding="utf-8")
+        files.append(rel)
+    return (
+        f"### {title} (часть 1 из {len(chunks)})\n{chunks[0].strip()}\n\n"
+        f"…продолжение — в файлах (прочитай все части перед ответом): {', '.join(files)}"
+    )
+
+
 def render(
     screen: Screen,
     shots: list[str],
@@ -76,8 +115,8 @@ def render(
     remarks: list[str],
     banned: list[str],
     notes: list[str] = (),
+    workspace: Path | None = None,
 ) -> str:
-    text = screen.text if len(screen.text) <= MAX_TEXT else screen.text[:MAX_TEXT] + "\n…(текст обрезан)"
     parts = [f"## Цель\n{GOAL}"]
 
     screen_lines = ["## Экран"]
@@ -90,8 +129,10 @@ def render(
     if screen.messages:
         screen_lines.append("Сообщения платформы:\n" + "\n".join(f"- {m}" for m in screen.messages))
     parts.append("\n".join(screen_lines))
-    parts.append(f"### Текст страницы\n{text.strip() or '—'}")
-    parts.append("### Элементы\n" + ("\n".join(e.for_worker() for e in screen.elements) or "—"))
+    # длинная страница — частями, как скриншоты: первая часть здесь, все — файлами в screens/
+    parts.append(_in_parts("Текст страницы", screen.text, MAX_TEXT, "text", workspace, banned))
+    elements = "\n".join(e.for_worker() for e in screen.elements)
+    parts.append(_in_parts("Элементы", elements, MAX_ELEMENTS, "elements", workspace, banned))
 
     if results or notes:
         parts.append("## Результат прошлых действий\n" + "\n".join([*map(_result_line, results), *notes]))

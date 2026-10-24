@@ -61,7 +61,7 @@ SCHEME_SVG = """<svg xmlns="http://www.w3.org/2000/svg" width="360" height="140"
 
 def reset() -> None:
     PROGRESS.clear()
-    STATS.update(quiz_checks=0, exam_submits=0, big_checks=0, traps={t: 0 for t in TRAPS})
+    STATS.update(quiz_checks=0, exam_submits=0, big_checks=0, radios={}, traps={t: 0 for t in TRAPS})
 
 
 reset()
@@ -283,6 +283,56 @@ async def big_check(request: Request):
         for i in range(1, BIG + 1)
     )
     return layout(request, "Результат", f"<p class='feedback'>Баллы: {score} из {BIG}</p>")
+
+
+# переключатели, как их размечают платформы:
+#   m — Moodle: видимый radio с aria-labelledby на div с текстом варианта;
+#   h — скрытый radio (0×0, opacity 0) внутри label — кликают по подписи;
+#   d — radio с display:none и label for=…;   c — скрытый checkbox в label
+RADIO_OPTIONS = ["Замещение", "Обмен", "Соединение"]
+
+
+@router.get("/course/radios")
+async def radios(request: Request):
+    if (resp := _guard(request)):
+        return resp
+    hidden = "position:absolute;opacity:0;width:0;height:0;margin:0"
+    m = "".join(
+        f'<div class="r"><input type="radio" name="m" value="{i}" id="m{i}" aria-labelledby="m{i}_label">'
+        f'<div id="m{i}_label" style="display:inline"><span class="answernumber">{"abc"[i - 1]}. </span>{o}</div></div>'
+        for i, o in enumerate(RADIO_OPTIONS, 1)
+    )
+    h = "".join(
+        f'<label class="opt" style="display:block;padding:4px"><input type="radio" name="h" value="{i}" style="{hidden}">'
+        f"<span>{o}</span></label>"
+        for i, o in enumerate(RADIO_OPTIONS, 1)
+    )
+    d = "".join(
+        f'<input type="radio" name="d" value="{i}" id="d{i}" style="display:none"><label for="d{i}">{o}</label> '
+        for i, o in enumerate(RADIO_OPTIONS, 1)
+    )
+    c = "".join(
+        f'<label style="display:block"><input type="checkbox" name="c" value="{i}" style="{hidden}"> {o}</label>'
+        for i, o in enumerate(RADIO_OPTIONS, 1)
+    )
+    body = (
+        '<form method="post" action="/course/radios/check">'
+        f'<div class="q"><p>Вопрос 1 (m). Тип реакции?</p>{m}</div>'
+        f'<div class="q"><p>Вопрос 2 (h). Тип реакции?</p>{h}</div>'
+        f'<div class="q"><p>Вопрос 3 (d). Тип реакции?</p>{d}</div>'
+        f'<div class="q"><p>Вопрос 4 (c). Отметьте все варианты.</p>{c}</div>'
+        '<button type="submit">Проверить</button></form>'
+    )
+    return layout(request, "Переключатели", body)
+
+
+@router.post("/course/radios/check")
+async def radios_check(request: Request):
+    if (resp := _guard(request)):
+        return resp
+    form = await request.form()
+    STATS["radios"] = {k: sorted(form.getlist(k)) for k in ("m", "h", "d", "c")}
+    return layout(request, "Результат", "<p class='feedback'>Ответы приняты.</p>")
 
 
 @router.get("/course/scheme.svg")

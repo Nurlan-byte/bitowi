@@ -206,3 +206,35 @@ def test_course_pages_need_login(lms):
     for path in ("/course", "/course/item/q1", "/course/item/exam", "/course/scheme.svg"):
         status, body = _anon(lms + path)
         assert status == 303 and "4721" not in body and "Иртыш" not in body, path
+
+
+async def test_hidden_and_labelledby_switches(courier, tmp_path, lms):
+    """Moodle radio with aria-labelledby, hidden radio in a label, display:none radio, hidden checkbox."""
+    await courier.browser.goto(lms + "/course/radios")
+    screen = await look(courier, tmp_path)
+    radios = [e for e in screen.elements if e.kind == "radio"]
+    boxes = [e for e in screen.elements if e.kind == "checkbox"]
+    assert len(radios) == 9 and len(boxes) == 3
+    assert [e.label for e in radios[:3]] == ["a. Замещение", "b. Обмен", "c. Соединение"]  # текст из aria-labelledby
+    assert all(e.label in ("Замещение", "Обмен", "Соединение") for e in radios[3:] + boxes)
+    assert all(e.checked is False for e in radios + boxes)
+
+    # номер — в доступном имени у всех, в том числе у подписи скрытого переключателя
+    names = await courier.browser.page.evaluate(
+        "() => [...document.querySelectorAll('[data-bitowi-n]')].map(el => [el.getAttribute('aria-label'), "
+        "el.hasAttribute('aria-labelledby'), el.getAttribute('role')])"
+    )
+    for e in radios + boxes:
+        aria, labelledby, _ = names[e.n - 1]
+        assert aria.startswith(f"[{e.n}] ") and not labelledby
+
+    picks = [radios[1], radios[5], radios[6], boxes[0], boxes[2]]
+    res = await courier.execute([Action(action="click", element=e.n) for e in picks])
+    assert all(r.ok for r in res.results), [r.error for r in res.results]
+    screen = await look(courier, tmp_path)
+    checked = {e.n for e in screen.elements if e.checked}
+    assert checked == {e.n for e in picks}
+    # после повторного осмотра исходная разметка восстановлена и снова заменена — без накопления
+    assert await courier.browser.page.evaluate("document.getElementById('m1').getAttribute('aria-labelledby')") is None
+    await courier.execute([Action(action="click", element=find(screen, "Проверить"))], allow_submit=True)
+    assert stats(lms)["radios"] == {"m": ["2"], "h": ["3"], "d": ["1"], "c": ["1", "3"]}

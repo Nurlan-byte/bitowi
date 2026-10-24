@@ -57,6 +57,8 @@ class Settings(BaseSettings):
     course_max_steps_per_page: int = 15
     # тот же экран столько раз подряд — застряли
     course_stuck_repeats: int = 3
+    # столько шагов подряд без единого выполненного действия — застряли
+    course_fail_repeats: int = 3
     # local — codex от текущего пользователя (разработка); sudo — от COURIER_USER через обёртку,
     # без доступа к /home бота (.env, state.json, логины)
     courier_mode: Literal["local", "sudo"] = "local"

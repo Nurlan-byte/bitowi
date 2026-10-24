@@ -157,3 +157,40 @@ async def mcp_session(args: list[str], calls: list[tuple[str, dict]]) -> list[st
     finally:
         proc.terminate()
         await proc.wait()
+
+
+@pytest.mark.e2e
+@pytest.mark.skipif(not MCP_BIN, reason="playwright-mcp не установлен")
+async def test_mcp_clicks_hidden_and_labelledby_radios(settings, tmp_path, lms):
+    pytest.importorskip("playwright")
+    from app.browser.session import BrowserSessions
+    from app.browser.sites import profile_for
+    from app.course.browser import CourseBrowser
+    from tests.lms_server import LMS_PASSWORD, LMS_USER, reset
+
+    reset(lms)
+    settings.fake_lms_host = lms.split("://", 1)[1]
+    settings.fake_lms_user, settings.fake_lms_password = LMS_USER, LMS_PASSWORD
+    url = lms + "/course/radios"
+    storage = await BrowserSessions(settings).ensure_session(profile_for(url, settings), url)
+    browser = CourseBrowser(settings, url, tmp_path / "profile", storage)
+    await browser.start()
+    try:
+        screen = await browser.inspect(tmp_path / "shots", 1)
+        switches = [e for e in screen.elements if e.kind in ("radio", "checkbox")]
+        args = CodexExecutor(settings).mcp_args(browser, tmp_path / "run")
+        snap, = await mcp_session(args, [("browser_snapshot", {})])
+        refs = dict(REF_RE.findall(snap))
+        # как в Moodle: без правки aria-labelledby номера в снапшоте не было — курьер писал «элемент не найден»
+        assert all(str(e.n) in refs for e in switches), [e.n for e in switches if str(e.n) not in refs]
+
+        m2 = next(e for e in switches if e.label == "b. Обмен")
+        h3 = [e for e in switches if e.kind == "radio" and e.label == "Соединение"][0]
+        await mcp_session(args, [("browser_snapshot", {}), ("browser_click", click(m2.n)),
+                                 ("browser_snapshot", {}), ("browser_click", click(h3.n))])
+        checked = await browser.page.evaluate(
+            "() => [document.getElementById('m2').checked, document.querySelector('input[name=h][value=\"3\"]').checked]"
+        )
+        assert checked == [True, True]
+    finally:
+        await browser.close()

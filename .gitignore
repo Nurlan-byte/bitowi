@@ -1,5 +1,7 @@
 # секреты и данные
 .env
+.env.*
+!.env.example
 data/
 tasks/
 state.json

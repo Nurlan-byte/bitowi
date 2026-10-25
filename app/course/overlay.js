@@ -58,10 +58,24 @@
   const labelledBy = (el) => (el.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean)
     .map((id) => document.getElementById(id)).filter(Boolean);
 
+  // переход по ссылке на другую страницу или пункт меню — не сдача (та же функция — в guard.js)
+  const MENU_ROLES = ['menuitem', 'menuitemradio', 'menuitemcheckbox', 'tab', 'treeitem'];
+  const navItem = (el) => {
+    if (MENU_ROLES.includes(el.getAttribute('role'))) return true;
+    if (el.tagName !== 'A' || !el.hasAttribute('href') || el.getAttribute('href').trim().startsWith('#')) return false;
+    try {
+      const u = new URL(el.href, location.href);
+      return /^https?:$/.test(u.protocol) && !u.hash;
+    } catch (e) {
+      return false;
+    }
+  };
+
+  const chosen = new Set();
   // скрытый radio/checkbox (оформленный переключатель): кликают по его подписи
   const proxyFor = (input) => {
     const candidates = [...(input.labels || []), input.closest('label'), ...labelledBy(input)];
-    return candidates.find((c) => c && visible(c) && !c.hasAttribute('data-bitowi-n')) || null;
+    return candidates.find((c) => c && visible(c) && !chosen.has(c)) || null;
   };
 
   const labelOf = (el, kind) => {
@@ -89,21 +103,93 @@
   box.setAttribute('aria-hidden', 'true');
   box.style.cssText = 'position:absolute;left:0;top:0;width:0;height:0;pointer-events:none;z-index:2147483647';
 
-  const elements = [];
-  let n = 0;
+  // 1. кандидаты; target — что нумеруем и по чему кликают: сам элемент или подпись скрытого переключателя
+  const insideChosen = (node) => {
+    for (let p = node.parentElement; p; p = p.parentElement) if (chosen.has(p)) return true;
+    return false;
+  };
+  const candidates = [];
   for (const el of document.querySelectorAll(SELECTOR)) {
     if (el.closest('#' + BOX)) continue;
     const kind = kindOf(el);
-    // target — что нумеруем и по чему кликают: сам элемент или подпись скрытого переключателя
     let target = el;
     if (!visible(el)) {
       if (kind !== 'radio' && kind !== 'checkbox') continue;
       target = proxyFor(el);
       if (!target) continue;
     }
-    if (target.hasAttribute('data-bitowi-n')) continue;
     // ссылка внутри кнопки и т.п. — нумеруем внешний элемент
-    if (target.parentElement && target.parentElement.closest('[data-bitowi-n]')) continue;
+    if (chosen.has(target) || insideChosen(target)) continue;
+    chosen.add(target);
+    candidates.push({ el, kind, target });
+  }
+
+  // 2. номер — только тому, во что можно кликнуть: перекрытое другим слоем (окно поверх, свёрнутое меню
+  // под страницей) или вне видимой области — без номера. Страницу проходим окнами по высоте экрана
+  const W = innerWidth;
+  const H = innerHeight;
+  const x0 = scrollX;
+  const y0 = scrollY;
+  const maxY = Math.max(0, document.documentElement.scrollHeight - H);
+  const MAX_VIEWS = 50;
+  const center = (t) => {
+    const r = t.getBoundingClientRect();
+    return [r.left + r.width / 2, r.top + r.height / 2];
+  };
+  // за краем прокручиваемого блока: его прокрутит кликер, elementFromPoint тут не судья
+  const clipped = (t, cx, cy) => {
+    for (let p = t.parentElement; p && p !== document.body && p !== document.documentElement; p = p.parentElement) {
+      const s = getComputedStyle(p);
+      if (/auto|scroll|hidden/.test(s.overflowX + ' ' + s.overflowY)) {
+        const r = p.getBoundingClientRect();
+        if (cx < r.left || cx >= r.right || cy < r.top || cy >= r.bottom) return true;
+      }
+    }
+    return false;
+  };
+  // в центре — сам элемент, его потомок или его подпись (оформленный переключатель)
+  const owns = (c, hit) => !!hit && (hit === c.target || c.target.contains(hit) ||
+    [...(c.el.labels || []), c.el.closest('label'), ...labelledBy(c.el)].some((l) => l && l.contains(hit)));
+
+  const reachable = new Set();
+  const covered = [];
+  let pending = candidates;
+  let views = 0;
+  for (let y = 0; pending.length && views < MAX_VIEWS; y += H) {
+    const yy = Math.min(y, maxY);
+    window.scrollTo(x0, yy);
+    views += 1;
+    pending = pending.filter((c) => {
+      const [cx, cy] = center(c.target);
+      if (clipped(c.target, cx, cy)) {
+        reachable.add(c);
+        return false;
+      }
+      if (cy < 0 || cy >= H) return true;  // не в этом окне — ждём следующего
+      if (cx < 0 || cx >= W) return false;  // за краем страницы по горизонтали
+      if (owns(c, document.elementFromPoint(cx, cy))) reachable.add(c);
+      else covered.push(c);
+      return false;
+    });
+    if (yy >= maxY) break;
+  }
+  // очень длинная страница: непроверенные оставляем как были; страница пройдена целиком — остаток вне видимой области
+  if (views >= MAX_VIEWS) pending.forEach((c) => reachable.add(c));
+  // перекрытые — ещё раз в середине экрана: у края окна их могла закрыть «липкая» шапка или подвал
+  for (const c of covered) {
+    const r = c.target.getBoundingClientRect();
+    window.scrollTo(x0, Math.min(maxY, Math.max(0, r.top + scrollY + r.height / 2 - H / 2)));
+    const [cx, cy] = center(c.target);
+    if (cy >= 0 && cy < H && cx >= 0 && cx < W && owns(c, document.elementFromPoint(cx, cy))) reachable.add(c);
+  }
+  window.scrollTo(x0, y0);
+
+  // 3. номера и бейджи
+  const elements = [];
+  let n = 0;
+  for (const c of candidates) {
+    if (!reachable.has(c)) continue;
+    const { el, kind, target } = c;
     n += 1;
     const label = labelOf(el, kind);
     target.setAttribute('data-bitowi-n', String(n));
@@ -132,6 +218,7 @@
       disabled: !!el.disabled || el.getAttribute('aria-disabled') === 'true',
       href: el.href && typeof el.href === 'string' ? el.href : '',
       submit_class: !!(el.matches && el.matches(submitClasses)),
+      nav_item: navItem(el),
     });
 
     // бейдж — canvas: нарисованный номер не попадает ни в дерево доступности (снапшот MCP), ни в innerText

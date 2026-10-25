@@ -7,7 +7,7 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import FSInputFile, InputMediaPhoto
 
-from app.bot.keyboards import preview_kb
+from app.bot.keyboards import consent_kb, preview_kb
 from app.db import Database, Task
 
 log = logging.getLogger(__name__)
@@ -44,13 +44,12 @@ class TelegramNotifier:
         body = f"Задача #{task.id}\n\nЗадание:\n{clip(task_text, 1500)}\n\nОтвет:\n{answer}"
         await self.bot.send_message(self.chat_id, clip(body), reply_markup=preview_kb(task.id))
 
-    async def course_preview(self, task: Task, shots: list[Path], answers: list[str], button: str) -> None:
-        """Screenshots with the filled answers, then the answers and the buttons [Отправить] [Исправить] [Отмена]."""
+    async def album(self, task: Task, shots: list[Path], caption: str) -> None:
+        """Up to 10 screenshots in one album (one photo — as a photo)."""
         photos = [p for p in shots if p.exists()][:10]
         if len(photos) == 1:
-            await self.photo(task, photos[0], f"Курс #{task.id} · перед сдачей")
+            await self.photo(task, photos[0], caption)
         elif photos:
-            caption = f"Курс #{task.id} · перед сдачей"
             media = [InputMediaPhoto(media=FSInputFile(p), caption=caption if i == 0 else None)
                      for i, p in enumerate(photos)]
             try:
@@ -58,7 +57,19 @@ class TelegramNotifier:
             except TelegramBadRequest as exc:
                 log.warning("media group failed: %s", exc)
                 for p in photos:
-                    await self.photo(task, p, f"Курс #{task.id}")
+                    await self.photo(task, p, caption)
+
+    async def consent_preview(self, task: Task, shots: list[Path], text: str, button: str) -> None:
+        """Screenshots, the verbatim text next to the consent element and [Нажать] [Не нажимать] [Пауза]."""
+        await self.album(task, shots, f"Курс #{task.id} · нужно согласие")
+        head = f"Курс #{task.id}: исполнитель просит нажать {button or '—'}\n\nТекст на странице (дословно):\n"
+        tail = "\n\nНажать — нажмёт ровно этот элемент; Не нажимать — исполнитель ищет другой путь; Пауза — курс на паузу."
+        body = clip(text or "—", LIMIT - len(head) - len(tail))
+        await self.bot.send_message(self.chat_id, head + body + tail, reply_markup=consent_kb(task.id))
+
+    async def course_preview(self, task: Task, shots: list[Path], answers: list[str], button: str) -> None:
+        """Screenshots with the filled answers, then the answers and the buttons [Отправить] [Исправить] [Отмена]."""
+        await self.album(task, shots, f"Курс #{task.id} · перед сдачей")
         lines = [f"Курс #{task.id}: готово к сдаче.", f"Будет нажато: {button or '—'}"]
         if answers:
             lines += ["", "Ответы:", *(f"{i}. {a}" for i, a in enumerate(answers, 1))]

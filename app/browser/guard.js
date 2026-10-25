@@ -12,6 +12,9 @@
   const re = (src) => new RegExp(src, 'i');
   const SUBMIT = re(POLICY.submit);
   const NAV = re(POLICY.nav);
+  const STATUS = new RegExp(POLICY.status, 'gi');
+  const CONSENT = re(POLICY.consent);
+  const CONSENT_BOX = re(POLICY.consent_box);
   const DANGER = re(POLICY.danger);
   const DENY = re(POLICY.deny);
   const DENY_HREF = re(POLICY.deny_href);
@@ -23,13 +26,52 @@
     [el.innerText, el.value, el.getAttribute && el.getAttribute('aria-label'), el.title]
       .filter(Boolean).join(' ').trim();
 
+  // переход по ссылке на другую страницу или пункт меню — не сдача (та же функция — в overlay.js).
+  // Ссылка-кнопка на JS (href="#…", javascript:) проверяется по тексту, как кнопка
+  const MENU_ROLES = ['menuitem', 'menuitemradio', 'menuitemcheckbox', 'tab', 'treeitem'];
+  const navItem = (el) => {
+    if (MENU_ROLES.includes(el.getAttribute && el.getAttribute('role'))) return true;
+    if (el.tagName !== 'A' || !el.hasAttribute('href') || el.getAttribute('href').trim().startsWith('#')) return false;
+    try {
+      const u = new URL(el.href, location.href);
+      return /^https?:$/.test(u.protocol) && !u.hash;
+    } catch (e) {
+      return false;
+    }
+  };
+
   // то же правило, что guard.is_submit в Python
   const isSubmit = (el) => {
     if (!el) return false;
-    const text = label(el);
+    const text = label(el).replace(STATUS, ' ');
     if (DANGER.test(text)) return true;
+    if (navItem(el)) return false;
     if (el.matches && el.matches(POLICY.submit_classes)) return !NAV.test(text) || SUBMIT.test(text);
     return SUBMIT.test(text) && !NAV.test(text);
+  };
+
+  // согласие («I understand», «Согласен», флажок honor code) — то же правило, что guard.is_consent в Python.
+  // Флажок находим и по клику на его подпись
+  const BOXES = 'input[type=checkbox], [role=checkbox]';
+  const boxOf = (t) => {
+    const direct = t.closest(BOXES);
+    if (direct) return direct;
+    const lab = t.closest('label');
+    return lab ? lab.control || lab.querySelector(BOXES) : null;
+  };
+  const boxText = (box) => {
+    const ids = (box.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean);
+    return [box.getAttribute('aria-label'), ...[...(box.labels || [])].map((l) => l.innerText),
+      box.closest('label') && box.closest('label').innerText,
+      ...ids.map((id) => document.getElementById(id)).filter(Boolean).map((l) => l.innerText)]
+      .filter(Boolean).join(' ');
+  };
+  const consentOf = (t) => {
+    if (!COURSE || !t || !t.closest) return null;
+    const box = boxOf(t);
+    if (box) return CONSENT_BOX.test(boxText(box)) ? box : null;
+    const el = t.closest(CLICKABLE);
+    return el && CONSENT.test(label(el)) ? el : null;
   };
 
   const hrefOf = (el) => {
@@ -100,9 +142,21 @@
 
   document.addEventListener('click', (event) => {
     const el = event.target && event.target.closest ? event.target.closest(CLICKABLE) : null;
-    if (!el) return;
-    const why = denied(el);
+    const why = el ? denied(el) : '';
     if (why) return block(event, el, why);
+    // согласие — по одноразовому разрешению после «Нажать» владельца
+    const consent = consentOf(event.target);
+    if (consent) {
+      // клик по подписи порождает второй клик — по самому флажку: он идёт по тому же разрешению
+      if (consent.__bitowiAllowed) return;
+      if (takeAllowance()) {
+        consent.__bitowiAllowed = true;
+        setTimeout(() => { consent.__bitowiAllowed = false; }, 0);
+        return;
+      }
+      return block(event, event.target.closest('[data-bitowi-n]') || consent, 'consent');
+    }
+    if (!el) return;
     if (isSubmit(el) || (external() && formSubmitter(el))) {
       if (!DANGER.test(label(el)) && takeAllowance()) {
         el.__bitowiAllowed = true;  // submit этой же кнопки не тратит второе разрешение

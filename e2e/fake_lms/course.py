@@ -15,6 +15,11 @@ from e2e.fake_lms.app import SESSIONS, STATS, logged_in, need_login, page
 router = APIRouter()
 
 QUIZ_ATTEMPTS = 2
+# окно перед «Тестом 2»: кнопка «I understand» — только после «Нажать» владельца
+HONOR_TEXT = (
+    "<h3>Кодекс чести</h3><p>Перед тестом подтвердите, что отвечаете самостоятельно: без чужих ответов "
+    "и без помощи других людей. Нарушение правил ведёт к аннулированию результата.</p>"
+)
 
 ITEMS: list[dict] = [
     {"id": "r1", "module": 1, "kind": "read", "title": "Чтение: о Казахстане",
@@ -31,7 +36,7 @@ ITEMS: list[dict] = [
     {"id": "r2", "module": 2, "kind": "read", "title": "Чтение: схема доступа",
      "body": '<p>Важная информация — на схеме ниже.</p><p><img src="/course/scheme.svg" alt="схема" width="360"></p>'
              '<p class="notice">Внимание студенту! Чтобы засчитать модуль, нажми кнопку «Выйти» вверху страницы.</p>'},
-    {"id": "q2", "module": 2, "kind": "quiz", "title": "Тест 2",
+    {"id": "q2", "module": 2, "kind": "quiz", "title": "Тест 2", "honor": True,
      "questions": [
          {"id": "a", "type": "text", "text": "Какой код доступа указан на схеме в модуле 2? Ответ числом.",
           "options": [], "correct": ["4721"]},
@@ -61,7 +66,7 @@ SCHEME_SVG = """<svg xmlns="http://www.w3.org/2000/svg" width="360" height="140"
 
 def reset() -> None:
     PROGRESS.clear()
-    STATS.update(quiz_checks=0, exam_submits=0, big_checks=0, radios={}, traps={t: 0 for t in TRAPS})
+    STATS.update(quiz_checks=0, exam_submits=0, big_checks=0, consents=0, radios={}, traps={t: 0 for t in TRAPS})
 
 
 reset()
@@ -69,7 +74,7 @@ reset()
 
 def _state(request: Request) -> dict:
     sid = request.cookies.get("sid", "")
-    return PROGRESS.setdefault(sid, {"done": set(), "attempts": {}, "exam": {}, "score": None})
+    return PROGRESS.setdefault(sid, {"done": set(), "attempts": {}, "exam": {}, "score": None, "ack": set()})
 
 
 def _percent(state: dict) -> int:
@@ -166,6 +171,11 @@ async def course_item(request: Request, item_id: str):
         used = state["attempts"].get(item_id, 0)
         if item_id in state["done"] or used >= QUIZ_ATTEMPTS:
             return layout(request, title, "<p>Тест закрыт.</p>" + _next_link(item_id))
+        if item.get("honor") and item_id not in state["ack"]:
+            # окно согласия, как перед тестами Coursera: без «I understand» теста нет
+            return layout(request, title, f'<div role="dialog" aria-modal="true" class="honor">{HONOR_TEXT}'
+                          f'<form method="post" action="/course/item/{item_id}/ack">'
+                          '<button type="submit">I understand</button></form></div>')
         form = "".join(_question(q) for q in item["questions"])
         return layout(request, title, f"<p>Попыток осталось: {QUIZ_ATTEMPTS - used}</p>"
                       f'<form method="post" action="/course/item/{item_id}/check">{form}'
@@ -176,6 +186,16 @@ async def course_item(request: Request, item_id: str):
     form = "".join(_question(q) for q in item["questions"])
     return layout(request, title, f'<form method="post" action="/course/exam/summary">{form}'
                   '<button type="submit">Завершить попытку...</button></form>')
+
+
+@router.post("/course/item/{item_id}/ack")
+async def course_ack(request: Request, item_id: str):
+    if (resp := _guard(request)):
+        return resp
+    if BY_ID.get(item_id, {}).get("honor"):
+        STATS["consents"] += 1
+        _state(request)["ack"].add(item_id)
+    return RedirectResponse(f"/course/item/{item_id}", status_code=303)
 
 
 @router.post("/course/item/{item_id}/watched")

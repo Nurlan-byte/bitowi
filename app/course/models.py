@@ -69,7 +69,11 @@ class Element(BaseModel):
     # только для оркестратора — воркеру не передаются
     href: str = ""
     submit_class: bool = False
+    # ссылка на другую страницу или пункт меню (navItem в overlay.js) — не сдача
+    nav_item: bool = False
     submit: bool = False
+    # кнопка или флажок согласия («I understand», honor code) — только после «Нажать» владельца
+    consent: bool = False
     blocked: str = ""
     # ссылка ведёт на внешний сайт (не домен курса)
     external: bool = False
@@ -90,6 +94,8 @@ class Element(BaseModel):
             line += " (недоступен)"
         elif self.submit:
             line += " (сдача — только после подтверждения)"
+        elif self.consent:
+            line += " (согласие — только после подтверждения владельца)"
         return line
 
 
@@ -126,7 +132,7 @@ class Screen(BaseModel):
 class Decision(BaseModel):
     """Worker output for one step."""
 
-    status: Literal["continue", "submit_ready", "course_done", "stuck"]
+    status: Literal["continue", "submit_ready", "confirm_needed", "course_done", "stuck"]
     answers: list[str] = []
     actions: list[Action] = []
     comment: str = ""
@@ -160,5 +166,8 @@ class ActionPlan(BaseModel):
     run: list[Action] = []
     # сдача: только после «Отправить» владельца
     pending_submit: list[Action] = []
+    # согласие: ровно одно нажатие, только после «Нажать» владельца; действия после него не выполняются
+    pending_consent: Action | None = None
+    dropped: list[Action] = []
     # не выполняются; воркеру — причина в следующем входе
     rejected: list[ActionResult] = []

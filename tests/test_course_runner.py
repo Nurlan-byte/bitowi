@@ -12,7 +12,7 @@ from app.agents.fakes import FakeBoss, FakeWorker  # noqa: E402
 from app.browser.session import BrowserSessions  # noqa: E402
 from app.course.courier import DirectExecutor  # noqa: E402
 from app.course.models import Decision  # noqa: E402
-from app.course.runner import CourseRunner  # noqa: E402
+from app.course.runner import KEEP_STEPS, CourseRunner  # noqa: E402
 from app.orchestrator import Orchestrator, State  # noqa: E402
 from tests.course_bot import CourseBot  # noqa: E402
 from tests.test_course_layers import agent_words  # noqa: E402
@@ -50,7 +50,8 @@ async def test_course_passes_with_three_confirmations(lms_settings, db, notifier
         await orch.wait_idle()
 
         buttons = []
-        for expected_checks in (0, 1, 2):
+
+        async def submit_preview(expected_checks):
             assert await state(orch, task.id) == State.AWAIT_CONFIRM
             # до «Отправить» платформа не получила ни одной сдачи
             s = stats(lms)
@@ -60,6 +61,20 @@ async def test_course_passes_with_three_confirmations(lms_settings, db, notifier
             buttons.append(button)
             assert await orch.confirm(task.id)
             await orch.wait_idle()
+
+        await submit_preview(0)
+        # перед «Тестом 2» — окно «I understand»: без «Нажать» владельца не нажато
+        assert await state(orch, task.id) == State.AWAIT_CONFIRM
+        assert stats(lms)["consents"] == 0
+        _, shots, text, button = notifier.consent_previews[-1]
+        assert "Кодекс чести" in text and "без чужих ответов" in text and "I understand" in button
+        assert shots and all(p.exists() for p in shots)
+        assert not await orch.confirm(task.id)  # «Отправить» не нажимает согласие
+        assert await orch.consent(task.id, "yes")
+        await orch.wait_idle()
+        assert stats(lms)["consents"] == 1
+        await submit_preview(1)
+        await submit_preview(2)
 
         assert buttons == ["Проверить", "Проверить", "Завершить попытку..."]
         assert await state(orch, task.id) == State.DONE
@@ -81,7 +96,20 @@ async def test_course_passes_with_three_confirmations(lms_settings, db, notifier
             assert agent_words(text) == []
         journal = (lms_settings.boss_root / str(task.id) / "journal.jsonl").read_text(encoding="utf-8").splitlines()
         assert json.loads(journal[-1])["status"] == "course_done"
+        statuses = [json.loads(line)["status"] for line in journal]
+        # нажатия после решения владельца — тоже в журнале
+        assert statuses.count("owner_submit") == 3 and statuses.count("owner_consent") == 1
+        assert statuses.count("consent_asked") == 1
         assert orch.course.browser is None  # браузер закрыт после конца курса
+
+        # скриншоты — только последних KEEP_STEPS шагов
+        steps = sorted(int(p.name) for p in (lms_settings.boss_root / str(task.id) / "steps").iterdir())
+        assert steps == list(range(steps[0], steps[0] + KEEP_STEPS))
+        # /screen и /log работают и после конца курса
+        assert await orch.show_screen({}) and notifier.albums[-1][0]
+        assert "Курс #" in notifier.messages[-1] and "Последние действия" in notifier.messages[-1]
+        log = await orch.course_log(5)
+        assert log.count("\n\n") == 5 and "course_done" in log
     finally:
         await orch.course.close()
 
@@ -126,6 +154,40 @@ async def test_stop_pauses_and_resume_continues(lms_settings, db, notifier, lms)
         # второй /stop на паузе отменяет курс
         await orch.stop()
         assert (await orch.stop()).state == State.CANCELLED
+    finally:
+        await orch.course.close()
+
+
+async def test_consent_declined_and_paused(lms_settings, db, notifier, lms):
+    bot = CourseBot()
+    orch = make(lms_settings, db, notifier, FakeWorker(decisions=[bot] * 10))
+    try:
+        # «Не нажимать»: исполнитель узнаёт про отказ и ищет другой путь — здесь его нет, stuck
+        task = await orch.submit_course(lms + "/course/item/q2")
+        await orch.wait_idle()
+        assert await state(orch, task.id) == State.AWAIT_CONFIRM and len(notifier.consent_previews) == 1
+        assert await orch.consent(task.id, "no")
+        await orch.wait_idle()
+        assert "Владелец отказался нажимать «I understand»" in bot.inputs[-1]
+        assert await state(orch, task.id) == State.PAUSED and "без согласия" in notifier.messages[-1]
+        assert stats(lms)["consents"] == 0
+        await orch.cancel(task.id)
+    finally:
+        await orch.course.close()
+
+    orch = make(lms_settings, db, notifier, FakeWorker(decisions=[CourseBot()] * 10))
+    try:
+        # «Пауза»: решение снято, /resume — снова спросит
+        task = await orch.submit_course(lms + "/course/item/q2")
+        await orch.wait_idle()
+        assert await orch.consent(task.id, "pause")
+        assert await state(orch, task.id) == State.PAUSED
+        assert (await db.get_course(task.id))["consent"] is None
+        assert not await orch.consent(task.id, "yes")  # старая кнопка после паузы не работает
+        await orch.resume()
+        await orch.wait_idle()
+        assert await state(orch, task.id) == State.AWAIT_CONFIRM and len(notifier.consent_previews) == 3
+        assert stats(lms)["consents"] == 0
     finally:
         await orch.course.close()
 

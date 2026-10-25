@@ -36,6 +36,20 @@ _BLOCKED_JS = """() => [...document.querySelectorAll('[data-bitowi-blocked]')].m
   return r;
 })"""
 
+# дословный текст, рядом с которым элемент: его окно (диалог) или ближайший блок с абзацем текста
+_CONTEXT_JS = """(n) => {
+  const el = document.querySelector(`[data-bitowi-n="${n}"]`);
+  if (!el) return '';
+  let p = el.closest('dialog, [role=dialog], [role=alertdialog], [aria-modal=true], .modal');
+  if (!p) {
+    p = el;
+    while (p.parentElement && p.parentElement !== document.body && (p.innerText || '').trim().length < 300) {
+      p = p.parentElement;
+    }
+  }
+  return (p.innerText || '').trim();
+}"""
+
 # страница отрисована: есть текст или хотя бы один видимый интерактивный элемент
 _RENDERED_JS = """() => {
   if (!document.body) return false;
@@ -298,6 +312,13 @@ class CourseBrowser:
             return bool(self.stamp) and await self.page.evaluate("window.__bitowiStamp || ''") == self.stamp
         except Exception:  # noqa: BLE001 — страница в процессе перехода
             return False
+
+    async def context_text(self, n: int) -> str:
+        """Verbatim text around element [n] (its dialog or paragraph) — for the owner, never for the worker."""
+        try:
+            return await self.page.evaluate(_CONTEXT_JS, n)
+        except Exception:  # noqa: BLE001 — страница в процессе перехода
+            return ""
 
     async def blocked(self) -> list[tuple[int, str]]:
         """Elements the guard refused to click since the last call: [(n, reason)]."""

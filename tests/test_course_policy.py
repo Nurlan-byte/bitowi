@@ -3,7 +3,7 @@
 import json
 
 from app import sanitize
-from app.browser.guard import DENY_RE, guard_script, is_submit
+from app.browser.guard import DENY_RE, guard_script, is_consent, is_submit
 from app.course.models import Action, Decision, Element
 from app.course.policy import classify, origin_of, plan_actions, safe_upload_path, same_origin
 
@@ -29,6 +29,29 @@ SUBMIT_LABELS = [
     ("Видео 1", False),
 ]
 
+# статус задания — не действие (курс #12: ссылка из меню Coursera)
+STATUS_LABELS = [
+    "Graded Assignment, Graded Quiz: Functions, Multiple Tables, and Sub-queries, Not submitted, 15 min",
+    "Quiz 1 · Submitted", "Тест 2 · Не сдано", "Задание · Отправлено на проверку", "Оценено",
+]
+# (текст, согласие-кнопка?, согласие-флажок?)
+CONSENT_CASES = [
+    ("I understand", True, True),
+    ("I agree", True, True),
+    ("Accept", True, True),
+    ("I acknowledge the rules", True, True),
+    ("Согласен", True, True),
+    ("Принимаю условия", True, True),
+    ("Я понимаю", True, True),
+    ("I, Ivan, understand that submitting work that isn't my own may result in failure. Honor Code", False, True),
+    ("I agree to the Terms of Use", True, True),
+    ("Academic integrity statement", False, True),
+    ("Далее", False, False),
+    ("Отправить", False, False),
+    ("Learn more", False, False),
+]
+CONSENT_LABELS = [label for label, _, _ in CONSENT_CASES]
+
 DENY_LABELS = ["Выйти", "Log out", "Профиль", "Настройки", "Изменить пароль", "Удалить аккаунт",
                "Отписаться от курса", "Unenrol me", "Оплатить", "Сообщения", "Форум", "Чат", "Комментарии",
                "Пригласить друга", "Сбросить попытку"]
@@ -38,6 +61,59 @@ ALLOWED_LABELS = ["Начать попытку", "Модуль 1. Введени
 def test_submit_labels():
     for label, expected in SUBMIT_LABELS:
         assert is_submit(label) is expected, label
+
+
+def test_status_text_is_not_an_action():
+    for label in STATUS_LABELS:
+        assert not is_submit(label), label
+    # само действие рядом со статусом — по-прежнему сдача
+    assert is_submit("Submit · Not submitted") and is_submit("Отправить (не сдано)")
+
+
+def test_nav_links_are_not_submits():
+    # ссылка на другую страницу и пункт меню — не сдача; «Показать ответ» — запрещён всегда
+    assert not is_submit("Submit assignment", nav_item=True)
+    assert is_submit("Показать ответ", nav_item=True)
+    graded = Element(n=67, kind="link", label=STATUS_LABELS[0], href=ORIGIN + "/learn/sql/quiz/2", nav_item=True)
+    assert not classify(graded, ORIGIN).submit
+    # тот же текст на кнопке: статус вырезан, сдачи нет
+    assert not classify(Element(n=1, kind="button", label=STATUS_LABELS[0]), ORIGIN).submit
+    # ссылка-кнопка на JS (href="#") — по тексту
+    assert classify(Element(n=2, kind="link", label="Submit", href=ORIGIN + "/q#"), ORIGIN).submit
+
+
+def test_consent_labels_and_classes():
+    for label, button, box in CONSENT_CASES:
+        assert is_consent(label) is button, label
+        assert is_consent(label, checkbox=True) is box, label
+    assert classify(Element(n=1, kind="button", label="I understand"), ORIGIN).consent
+    assert classify(Element(n=2, kind="checkbox", label="I agree to the Honor Code"), ORIGIN).consent
+    # вариант ответа — не согласие; «Принять и отправить» — сдача, её подтверждает превью
+    assert not classify(Element(n=3, kind="radio", label="I agree"), ORIGIN).consent
+    both = classify(Element(n=4, kind="button", label="Accept and submit"), ORIGIN)
+    assert both.submit and not both.consent
+    assert "(согласие — только после подтверждения владельца)" in classify(
+        Element(n=5, kind="button", label="I understand"), ORIGIN).for_worker()
+
+
+def test_plan_consent_waits_alone(tmp_path):
+    els = [classify(e, ORIGIN) for e in (
+        Element(n=1, kind="radio", label="391"),
+        Element(n=2, kind="checkbox", label="I agree to the Honor Code"),
+        Element(n=3, kind="button", label="Submit"),
+        Element(n=4, kind="button", label="Продолжить"),
+    )]
+    click = lambda n: Action(action="click", element=n)  # noqa: E731
+    # ответ, флажок кодекса, сдача: сначала ответ, флажок ждёт владельца, сдача — следующим шагом
+    plan = plan_actions([click(1), click(2), click(3)], els, tmp_path)
+    assert plan.run == [click(1)] and plan.pending_consent == click(2) and plan.dropped == [click(3)]
+    assert not plan.pending_submit
+    # согласие после сдачи — уже другой экран
+    plan = plan_actions([click(1), click(3), click(2), click(4)], els, tmp_path)
+    assert plan.pending_submit == [click(3)] and plan.dropped == [click(2), click(4)] and plan.pending_consent is None
+    # confirm_needed: исполнитель спрашивает про обычную кнопку
+    plan = plan_actions([click(4)], els, tmp_path, ask=4)
+    assert plan.pending_consent == click(4) and not plan.run
 
 
 def test_submit_class_without_nav_text():

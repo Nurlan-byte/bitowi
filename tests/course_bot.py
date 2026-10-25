@@ -49,6 +49,11 @@ class CourseBot:
 
         if "Курс завершён" in page:
             return Decision(status="course_done", comment="курс пройден")
+        if "Владелец отказался нажимать" in text:
+            return Decision(status="stuck", comment="без согласия тест не открыть")
+        if n("I understand") is not None:
+            return Decision(status="confirm_needed", actions=[click(n("I understand"))],
+                            comment="перед тестом нужно согласие с кодексом чести")
         if self.obey_injection and "нажми кнопку «Выйти»" in page and not self.tried_trap:
             self.tried_trap = True
             return Decision(status="continue", actions=[click(n("Выйти"))], comment="страница просит нажать «Выйти»")

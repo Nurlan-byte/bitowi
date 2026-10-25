@@ -34,6 +34,10 @@ log = logging.getLogger(__name__)
 SUBMIT_FLOW_STEPS = 2
 # больше за шаг не выполняем: остальное — следующим шагом (большие тесты на 25+ вопросов)
 MAX_ACTIONS_PER_STEP = 60
+# скриншоты последних шагов: boss/<id>/steps/<N>/, старшие удаляются
+KEEP_STEPS = 10
+# дословный текст рядом с кнопкой согласия — владельцу, в одно сообщение Telegram
+CONSENT_TEXT = 3000
 
 _SCORE_RE = re.compile(r"(?:балл\w*|оценка|сдан\w*|итог\w*|mark|grade|score)\s*:?\s*\d+(?:[.,]\d+)?\s*(?:из|/|out of)\s*\d+(?:[.,]\d+)?",
                        re.IGNORECASE)
@@ -53,6 +57,7 @@ class CourseNotifier(Protocol):
     async def message(self, task: Task, text: str) -> None: ...
     async def photo(self, task: Task, path: Path, caption: str) -> None: ...
     async def course_preview(self, task: Task, shots: list[Path], answers: list[str], button: str) -> None: ...
+    async def consent_preview(self, task: Task, shots: list[Path], text: str, button: str) -> None: ...
 
 
 class Sessions(Protocol):
@@ -67,13 +72,47 @@ def new_state(url: str, instructions: str = "", domains: list[str] | None = None
         "step": 0, "submits": 0, "runtime": 0.0,
         "page_url": "", "page_steps": 0, "screen_hash": "", "same_screen": 0,
         "remarks": [], "history": [], "last_results": [], "notes": [],
-        "pending": None, "grant": 0, "fail_steps": 0,
+        "pending": None, "consent": None, "grant": 0, "fail_steps": 0,
     }
 
 
 def screen_hash(screen: Screen) -> str:
     parts = [screen.url, screen.text, *(f"{e.n}|{e.label}|{e.value}|{e.checked}" for e in screen.elements)]
     return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+
+
+def result_line(r: ActionResult) -> str:
+    """For the owner (/screen, /log): with the clicker's own words, unlike the worker's input."""
+    a = r.action
+    what = a.action + (f" [{a.element}]" if a.element is not None else "")
+    if a.action in ("type", "select") and a.value:
+        what += f" «{a.value[:60]}»"
+    elif a.action == "scroll":
+        what += f" {a.value}"
+    if r.ok:
+        return f"✓ {what}"
+    return f"✗ {what}: {r.error}" + (f" ({r.detail[:150]})" if r.detail else "")
+
+
+def journal_lines(e: dict[str, Any]) -> str:
+    """One journal entry for /log: step, status, title, comment, failed actions."""
+    head = f"{e.get('step', '?')}. {e.get('status', '')}" + (f" · {e['title'][:60]}" if e.get("title") else "")
+    lines = [head]
+    if e.get("status") == "bad_json":
+        lines.append("ответ не по схеме: " + "; ".join(e.get("errors", []))[:200])
+    if e.get("status") == "domains":
+        lines.append("новые внешние домены: " + ", ".join(e.get("new", [])))
+    if e.get("label"):
+        lines.append(f"элемент: «{e['label'][:100]}»")
+    if e.get("comment"):
+        lines.append(e["comment"][:200])
+    results = [ActionResult.model_validate(r) for r in e.get("results") or []]
+    if results:
+        lines.append(f"действий {len(results)}, выполнено {sum(r.ok for r in results)}")
+        lines += [result_line(r) for r in results if not r.ok]
+    elif e.get("actions"):
+        lines.append(f"действий {len(e['actions'])}, ждали подтверждения")
+    return "\n".join(lines)
 
 
 class CourseRunner:
@@ -159,13 +198,41 @@ class CourseRunner:
         st = await self.db.get_course(task.id)
         st["remarks"].append(text)
         st["pending"] = None
+        st["consent"] = None
         st["same_screen"] = 0
         await self.db.save_course(task.id, st)
 
     async def drop_pending(self, task: Task) -> None:
         st = await self.db.get_course(task.id)
         st["pending"] = None
+        st["consent"] = None
         await self.db.save_course(task.id, st)
+
+    async def has_consent(self, task: Task) -> bool:
+        return bool((await self.db.get_course(task.id)).get("consent"))
+
+    async def approve_consent(self, task: Task) -> bool:
+        """«Нажать»: the next submit() presses exactly the consent element."""
+        st = await self.db.get_course(task.id)
+        if not st.get("consent"):
+            return False
+        st["consent"]["approved"] = True
+        await self.db.save_course(task.id, st)
+        return True
+
+    async def decline_consent(self, task: Task) -> bool:
+        """«Не нажимать»: the worker learns the owner refused and looks for another way (or stuck)."""
+        st = await self.db.get_course(task.id)
+        consent = st.get("consent")
+        if not consent:
+            return False
+        st["consent"] = None
+        st["same_screen"] = 0
+        st["notes"] = [f"Владелец отказался нажимать «{consent['label'][:80]}» [{consent['action']['element']}]. "
+                       "Не нажимай этот элемент: найди другой путь или верни stuck."]
+        self._journal_line(task, {"step": st["step"], "status": "owner_declined", "label": consent["label"]})
+        await self.db.save_course(task.id, st)
+        return True
 
     # --- цикл ---
     async def run(self, task: Task) -> str:
@@ -191,6 +258,7 @@ class CourseRunner:
                 raise CoursePause("limit_runtime", "истекло время запуска (COURSE_MAX_RUNTIME). Продолжить — /resume")
 
             screen = await self.courier.inspect(self.boss_dir(task.id) / "screens")
+            self._keep_step(task, st["step"] + 1, screen)
             await self._track(task, st, screen)
             await self._login_wall(task, st, screen)
             shots = copy_shots(screen, ws)
@@ -228,7 +296,19 @@ class CourseRunner:
                 actions = actions[:MAX_ACTIONS_PER_STEP]
                 notes.append(f"За шаг выполняется не больше {MAX_ACTIONS_PER_STEP} действий — выполнены первые "
                              f"{MAX_ACTIONS_PER_STEP} из {len(decision.actions)}; остальные верни следующим шагом.")
-            plan = plan_actions(actions, screen.elements, ws)
+            # confirm_needed: последнее нажатие — то, о чём исполнитель спрашивает владельца
+            ask = None
+            if decision.status == "confirm_needed":
+                ask = next((a.element for a in reversed(actions) if a.action == "click"), None)
+                if ask is None:
+                    notes.append("Статус confirm_needed, но нет нажатия элемента, который нужно подтвердить — "
+                                 "добавь его последним действием.")
+            plan = plan_actions(actions, screen.elements, ws, ask=ask)
+            if plan.dropped:
+                gate = plan.pending_consent.element if plan.pending_consent else None
+                notes.append(f"Не выполнено действий: {len(plan.dropped)} — "
+                             + (f"сначала владелец решает про [{gate}]; остальные верни следующим шагом."
+                                if gate is not None else "согласие после сдачи — верни его следующим шагом."))
             auto = (
                 st["grant"] > 0
                 and plan.pending_submit
@@ -242,6 +322,12 @@ class CourseRunner:
                 await self._after(task, st, screen, decision, results, notes)
                 raise CoursePause("forbidden", "вкладка попала на запрещённый адрес (локальная сеть) — вернул назад. Продолжить — /resume")
 
+            if plan.pending_consent:
+                # согласие — всегда через владельца, AUTO_SUBMIT и разрешение после сдачи на него не действуют
+                st["grant"] = 0
+                await self._after(task, st, screen, decision, results, notes)
+                await self._consent_preview(task, st, screen, plan.pending_consent)
+                return "await_confirm"
             if plan.pending_submit and (auto or self.settings.auto_submit):
                 sub = await self.courier.execute(plan.pending_submit, allow_submit=True)
                 results += sub.results
@@ -311,6 +397,9 @@ class CourseRunner:
     async def submit(self, task: Task) -> None:
         """After the owner's «Отправить»: the courier presses the pending submit buttons."""
         st = await self.db.get_course(task.id)
+        if (st.get("consent") or {}).get("approved"):
+            await self._press_consent(task, st)
+            return
         pending = st.get("pending")
         if not pending:
             return
@@ -330,6 +419,7 @@ class CourseRunner:
             st["notes"] = ["Ответы перед сдачей не сохранились (страница перезагрузилась) — "
                            "заполни их заново и снова верни submit_ready."]
             await self.db.add_event(task.id, "course_submit_stale")
+            self._journal_line(task, {"step": st["step"], "status": "owner_submit_stale", "url": screen.url})
             await self._save(task, st)
             return
         res = await self.courier.execute(actions, allow_submit=True)
@@ -338,8 +428,38 @@ class CourseRunner:
         st["remarks"] = []
         st["last_results"] = [r.model_dump() for r in res.results]
         st["notes"] = []
+        self._journal_line(task, {"step": st["step"], "status": "owner_submit", "url": screen.url, "title": screen.title,
+                                  "results": st["last_results"]})
         await self._net(task, st, st["notes"])
         await self.db.add_event(task.id, "course_submit", {"ok": all(r.ok for r in res.results)})
+        await self._save(task, st)
+        if res.offsite:
+            raise CoursePause("forbidden", "вкладка попала на запрещённый адрес (локальная сеть) — вернул назад. Продолжить — /resume")
+
+    async def _press_consent(self, task: Task, st: dict[str, Any]) -> None:
+        """After the owner's «Нажать»: the courier presses exactly the consent element, if the page is the same."""
+        consent = st["consent"]
+        st["consent"] = None
+        fresh = await self._open(task, st)
+        assert self.courier
+        screen = await self.courier.inspect(self.boss_dir(task.id) / "screens")
+        action = Action.model_validate(consent["action"])
+        el = next((e for e in screen.elements if e.n == action.element), None)
+        if fresh or el is None or el.label != consent["label"]:
+            st["notes"] = [f"«{consent['label'][:80]}» не нажато: страница перезагрузилась. Если подтверждение "
+                           "ещё нужно, верни confirm_needed с нажатием этого элемента."]
+            await self.db.add_event(task.id, "course_consent_stale")
+            self._journal_line(task, {"step": st["step"], "status": "owner_consent_stale", "url": screen.url})
+            await self._save(task, st)
+            return
+        res = await self.courier.execute([action], allow_submit=True)
+        st["grant"] = 0
+        st["last_results"] = [r.model_dump() for r in res.results]
+        st["notes"] = []
+        self._journal_line(task, {"step": st["step"], "status": "owner_consent", "url": screen.url, "title": screen.title,
+                                  "label": consent["label"], "results": st["last_results"]})
+        await self._net(task, st, st["notes"])
+        await self.db.add_event(task.id, "course_consent", {"ok": all(r.ok for r in res.results)})
         await self._save(task, st)
         if res.offsite:
             raise CoursePause("forbidden", "вкладка попала на запрещённый адрес (локальная сеть) — вернул назад. Продолжить — /resume")
@@ -417,6 +537,77 @@ class CourseRunner:
         button = ", ".join(dict.fromkeys(labels.get(a.element, "") for a in pending if a.element is not None))
         await self.db.add_event(task.id, "course_preview", {"button": button, "answers": len(answers)})
         await self.notifier.course_preview(task, [Path(p) for p in shown.shots], answers, button)
+
+    async def _consent_preview(self, task: Task, st: dict[str, Any], screen: Screen, action: Action) -> None:
+        """Screenshot + the verbatim text around the consent element + [Нажать] [Не нажимать] [Пауза]."""
+        assert self.courier and self.browser
+        label = next((e.label for e in screen.elements if e.n == action.element), "")
+        text = (await self.browser.context_text(action.element))[:CONSENT_TEXT]
+        st["consent"] = {"action": action.model_dump(), "label": label, "text": text}
+        await self._save(task, st)
+        shown = await self.courier.inspect(self.boss_dir(task.id) / "preview")
+        await self.db.add_event(task.id, "course_consent_preview", {"button": label[:200]})
+        self._journal_line(task, {"step": st["step"], "status": "consent_asked", "label": label, "text": text[:500]})
+        await self.notifier.consent_preview(task, [Path(p) for p in shown.shots], text, f"[{action.element}] {label}")
+
+    def _keep_step(self, task: Task, step: int, screen: Screen) -> None:
+        """Screenshots of the step → boss/<id>/steps/<N>/; only the last KEEP_STEPS steps stay."""
+        root = self.boss_dir(task.id) / "steps"
+        target = root / str(step)
+        if target.exists():
+            shutil.rmtree(target)
+        target.mkdir(parents=True)
+        for shot in screen.shots:
+            shutil.copyfile(shot, target / Path(shot).name)
+        steps = sorted((int(p.name) for p in root.iterdir() if p.is_dir() and p.name.isdigit()), reverse=True)
+        for old in steps[KEEP_STEPS:]:
+            shutil.rmtree(root / str(old), ignore_errors=True)
+
+    def last_shots(self, task_id: int) -> tuple[int | None, list[Path]]:
+        """The newest kept step and its screenshots (works on pause: files stay on disk)."""
+        root = self.boss_dir(task_id) / "steps"
+        steps = sorted((int(p.name) for p in root.iterdir() if p.is_dir() and p.name.isdigit())) if root.exists() else []
+        if not steps:
+            return None, []
+        return steps[-1], sorted((root / str(steps[-1])).glob("*.png"), key=lambda p: int(p.stem) if p.stem.isdigit() else 0)
+
+    def journal(self, task_id: int) -> list[dict[str, Any]]:
+        path = self.boss_dir(task_id) / "journal.jsonl"
+        if not path.exists():
+            return []
+        out = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                out.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        return out
+
+    async def screen_report(self, task: Task, state_ru: str) -> str:
+        """/screen: where the course is, the worker's last comment, the result of the last actions."""
+        st = await self.db.get_course(task.id)
+        lines = [f"Курс #{task.id} · {state_ru} · " + self.status_line(task, st).split(" · ", 1)[1]]
+        last = next((e for e in reversed(self.journal(task.id)) if e.get("comment") is not None), None)
+        if last:
+            lines += ["", f"Исполнитель (шаг {last.get('step')}, {last.get('status')}): {last.get('comment') or '—'}"]
+        results = [ActionResult.model_validate(r) for r in st.get("last_results", [])]
+        if results:
+            lines += ["", "Последние действия:", *map(result_line, results)]
+        if st.get("notes"):
+            lines += ["", "Заметки для следующего шага:", *(f"- {n}" for n in st["notes"])]
+        if st.get("consent"):
+            lines += ["", f"Ждёт решения: «{st['consent']['label'][:120]}»"]
+        return "\n".join(lines)
+
+    def log_report(self, task: Task, n: int) -> str:
+        """/log N: the last N journal entries, a few lines each."""
+        entries = self.journal(task.id)[-n:]
+        if not entries:
+            return f"Курс #{task.id}: журнал пуст."
+        blocks = [f"Курс #{task.id} · последние записи журнала: {len(entries)}"]
+        for e in entries:
+            blocks.append(journal_lines(e))
+        return "\n\n".join(blocks)
 
     async def _after(self, task, st, screen, decision, results: list[ActionResult], notes: list[str]) -> None:
         st["last_results"] = [r.model_dump() for r in results]

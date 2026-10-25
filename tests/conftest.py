@@ -14,6 +14,8 @@ class FakeNotifier:
         self.messages: list[str] = []
         self.photos: list[Path] = []
         self.course_previews: list[tuple[int, list[Path], list[str], str]] = []
+        self.consent_previews: list[tuple[int, list[Path], str, str]] = []
+        self.albums: list[tuple[list[Path], str]] = []
 
     async def status(self, task, text: str) -> None:
         self.statuses.append(text)
@@ -29,6 +31,12 @@ class FakeNotifier:
 
     async def course_preview(self, task, shots: list[Path], answers: list[str], button: str) -> None:
         self.course_previews.append((task.id, shots, answers, button))
+
+    async def consent_preview(self, task, shots: list[Path], text: str, button: str) -> None:
+        self.consent_previews.append((task.id, shots, text, button))
+
+    async def album(self, task, shots: list[Path], caption: str) -> None:
+        self.albums.append((shots, caption))
 
 
 class FakeSessions:

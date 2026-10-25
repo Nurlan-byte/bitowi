@@ -7,7 +7,7 @@ stopped there too.
 from pathlib import Path
 from urllib.parse import urlparse
 
-from app.browser.guard import DENY_HREF_RE, DENY_RE, is_submit
+from app.browser.guard import DENY_HREF_RE, DENY_RE, is_consent, is_submit
 from app.course.models import Action, ActionPlan, ActionResult, Element
 from app.course.netpolicy import NetPolicy
 
@@ -42,8 +42,12 @@ def classify(el: Element, policy: NetPolicy | str) -> Element:
         elif policy.literal_block(el.href):
             blocked = "private"
     external = bool(el.href) and el.href.startswith(("http://", "https://")) and not policy.is_course(el.href)
-    submit = el.kind == "file" or (clickable and is_submit(el.label, el.submit_class))
-    return el.model_copy(update={"blocked": blocked, "submit": submit and not blocked, "external": external})
+    submit = el.kind == "file" or (clickable and is_submit(el.label, el.submit_class, el.nav_item))
+    # «Принять и отправить» — сдача: её превью и так подтверждает владелец
+    consent = not submit and (clickable or el.kind == "checkbox") and is_consent(el.label, el.kind == "checkbox")
+    return el.model_copy(update={
+        "blocked": blocked, "submit": submit and not blocked, "consent": consent and not blocked, "external": external,
+    })
 
 
 def safe_upload_path(value: str, workspace: Path) -> Path | None:
@@ -87,21 +91,31 @@ def _check(action: Action, el: Element | None, workspace: Path) -> str:
     return ""
 
 
-def plan_actions(actions: list[Action], elements: list[Element], workspace: Path) -> ActionPlan:
+def plan_actions(actions: list[Action], elements: list[Element], workspace: Path, ask: int | None = None) -> ActionPlan:
     """Split worker actions: run now / wait for the owner's confirmation / rejected.
 
     Everything from the first submit action on waits: the following actions belong to the
-    screen after the submission.
+    screen after the submission. A consent click (or the element the worker asked about —
+    status confirm_needed, `ask`) waits alone: the actions after it are dropped.
     """
     by_n = {el.n: el for el in elements}
     plan = ActionPlan()
     for action in actions:
+        if plan.pending_consent is not None or plan.dropped:
+            plan.dropped.append(action)
+            continue
         el = by_n.get(action.element) if action.element is not None else None
         why = _check(action, el, workspace)
+        consent = el is not None and action.action == "click" and (el.consent or el.n == ask) and not el.submit
         if why:
             plan.rejected.append(_reject(action, why))
+        elif consent and plan.pending_submit:
+            # согласие после сдачи — уже другой экран
+            plan.dropped.append(action)
         elif plan.pending_submit or (el is not None and el.submit and action.action in ("click", "upload")):
             plan.pending_submit.append(action)
+        elif consent:
+            plan.pending_consent = action
         else:
             plan.run.append(action)
     return plan

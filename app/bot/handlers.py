@@ -21,6 +21,9 @@ log = logging.getLogger(__name__)
 URL_RE = re.compile(r"https?://[^\s\"'<>«»()\[\]]+(?<![.,;:!?])", re.IGNORECASE)
 BARE_REST = re.compile(r"[\s\"'<>«»()\[\].,;:!?]+")
 FIX_MARK = re.compile(r"Исправить задачу #(\d+)")
+LOG_DEFAULT = 5
+LOG_MAX = 20
+CONSENT_ANSWER = {"yes": "Нажимаю", "no": "Не нажимаю — исполнитель ищет другой путь", "pause": "Курс на паузе"}
 
 STATE_RU = {
     State.QUEUED: "в очереди",
@@ -46,6 +49,8 @@ HELP = (
     "/status — текущая задача\n"
     "/stop — остановить: курс — на паузу (второй /stop — отмена), задачу — отменить\n"
     "/resume — продолжить после паузы\n"
+    "/screen — экран курса: скриншоты с номерами, комментарий исполнителя, результат действий\n"
+    "/log [N] — последние N шагов журнала курса (по умолчанию 5)\n"
     "/history — последние 10 задач\n"
     "/id — твой Telegram ID\n\n"
     "Ответ (reply) на моё сообщение — реплика в блокнот текущей задачи."
@@ -174,6 +179,18 @@ def build_router(orch: Orchestrator, owner_id: int) -> Router:
         task = await orch.resume()
         await message.answer(f"Продолжаю задачу #{task.id}." if task else "Задач на паузе нет.")
 
+    @owner.message(Command("screen"))
+    async def cmd_screen(message: Message) -> None:
+        if not await orch.show_screen(STATE_RU):
+            await message.answer("Курсов нет.")
+
+    @owner.message(Command("log"))
+    async def cmd_log(message: Message, command: CommandObject) -> None:
+        arg = (command.args or "").strip()
+        n = min(LOG_MAX, max(1, int(arg))) if arg.isdigit() else LOG_DEFAULT
+        text = await orch.course_log(n)
+        await message.answer(clip(text) if text else "Курсов нет.")
+
     @owner.message(Command("history"))
     async def cmd_history(message: Message) -> None:
         tasks = await orch.db.last_tasks(10)
@@ -190,6 +207,13 @@ def build_router(orch: Orchestrator, owner_id: int) -> Router:
     @owner.callback_query(TaskAction.filter())
     async def on_action(query: CallbackQuery, callback_data: TaskAction) -> None:
         tid = callback_data.task_id
+        if callback_data.action.startswith("consent_"):
+            choice = callback_data.action.removeprefix("consent_")
+            ok = await orch.consent(tid, choice)
+            await query.answer(CONSENT_ANSWER.get(choice, "") if ok else "Курс уже не ждёт решения")
+            if query.message and ok:
+                await query.message.edit_reply_markup(reply_markup=None)
+            return
         if callback_data.action == "submit":
             ok = await orch.confirm(tid)
             await query.answer("Принято" if ok else "Задача уже не ждёт подтверждения")

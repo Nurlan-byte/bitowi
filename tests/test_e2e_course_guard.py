@@ -9,9 +9,11 @@ pytest.importorskip("playwright")
 
 from playwright.async_api import async_playwright  # noqa: E402
 
-from app.browser.guard import ALLOW_KEY, DENY_RE, guard_script, is_submit  # noqa: E402
+from app.browser.guard import ALLOW_KEY, DENY_RE, guard_script, is_consent, is_submit  # noqa: E402
 from app.course.netpolicy import NetPolicy  # noqa: E402
-from tests.test_course_policy import ALLOWED_LABELS, DENY_LABELS, SUBMIT_LABELS  # noqa: E402
+from tests.test_course_policy import (  # noqa: E402
+    ALLOWED_LABELS, CONSENT_LABELS, DENY_LABELS, STATUS_LABELS, SUBMIT_LABELS,
+)
 
 pytestmark = pytest.mark.e2e
 
@@ -46,6 +48,17 @@ CONFIRM = """<!doctype html><meta charset="utf-8"><title>Подтвержден�
 """
 
 
+# окно согласия, ссылка на задание со статусом и ссылка-кнопка на JS
+CONSENT = """<!doctype html><meta charset="utf-8"><title>Перед тестом</title>
+<div role="dialog"><p>Кодекс чести: отвечайте самостоятельно.</p>
+<label><input id="honor" type="checkbox" style="position:absolute;opacity:0;width:0;height:0">
+<span id="honor_text">I agree to the Honor Code</span></label>
+<button id="iu" onclick="document.title='понял'">I understand</button></div>
+<a id="graded" href="/quiz2">Graded Assignment · Quiz 2 · Not submitted</a>
+<a id="jsub" href="#" onclick="document.title='сдано'; return false">Submit</a>
+"""
+
+
 @pytest.fixture
 async def browser_page():
     hits: list[str] = []
@@ -54,7 +67,8 @@ async def browser_page():
         url = route.request.url
         hits.append(f"{route.request.method} {url}")
         path = url.split("://", 1)[1].split("/", 1)[-1]
-        body = {"": PAGE, "submit": CONFIRM, "form": EXTERNAL, "navform": NAVFORM}.get(path, f"<title>{path}</title>ok")
+        body = {"": PAGE, "submit": CONFIRM, "form": EXTERNAL, "navform": NAVFORM, "consent": CONSENT}.get(
+            path, f"<title>{path}</title>ok")
         await route.fulfill(content_type="text/html; charset=utf-8", body=body)
 
     pw = await async_playwright().start()
@@ -158,17 +172,50 @@ async def test_course_site_navigation_forms_stay_free(browser_page):
     await page.wait_for_url(COURSE + "/page3")
 
 
+async def test_consent_only_by_allowance_and_links_are_not_submits(browser_page):
+    page, _ = browser_page
+    await page.goto(COURSE + "/consent")
+    title = await page.title()
+    # без «Нажать» владельца: ни кнопки согласия, ни флажка кодекса (клик по подписи)
+    await page.click("#iu")
+    await page.click("#honor_text")
+    assert await page.title() == title
+    assert await page.get_attribute("#iu", "data-bitowi-blocked") == "consent"
+    assert not await page.is_checked("#honor")
+    # ссылка-кнопка на JS проверяется по тексту, как кнопка
+    await page.click("#jsub")
+    assert await page.title() == title
+
+    # одно разрешение — одно согласие: подпись и сам флажок проходят вместе
+    await allow(page, 1)
+    await page.click("#honor_text")
+    assert await page.is_checked("#honor")
+    await page.click("#iu")
+    assert await page.title() == title
+    await allow(page, 1)
+    await page.click("#iu")
+    assert await page.title() == "понял"
+
+    # переход к заданию со статусом «Not submitted» — не сдача
+    await page.click("#graded")
+    await page.wait_for_url(COURSE + "/quiz2")
+
+
 async def test_js_and_python_patterns_agree(browser_page):
     page, _ = browser_page
-    labels = [label for label, _ in SUBMIT_LABELS] + DENY_LABELS + ALLOWED_LABELS
+    labels = [label for label, _ in SUBMIT_LABELS] + DENY_LABELS + ALLOWED_LABELS + STATUS_LABELS + CONSENT_LABELS
     policy = json.loads(guard_script("course").split("const POLICY = ", 1)[1].split(";\n", 1)[0])
     js = await page.evaluate(
         """([p, labels]) => {
             const re = (s) => new RegExp(s, 'i');
-            const [S, N, D, X] = [re(p.submit), re(p.nav), re(p.danger), re(p.deny)];
-            return labels.map(t => [D.test(t) || (S.test(t) && !N.test(t)), X.test(t)]);
+            const [S, N, D, X, C, B] = [re(p.submit), re(p.nav), re(p.danger), re(p.deny), re(p.consent), re(p.consent_box)];
+            const st = new RegExp(p.status, 'gi');
+            return labels.map((t) => {
+                const u = t.replace(st, ' ');
+                return [D.test(u) || (S.test(u) && !N.test(u)), X.test(t), C.test(t), B.test(t)];
+            });
         }""",
         [policy, labels],
     )
-    py = [[is_submit(t), bool(DENY_RE.search(t))] for t in labels]
+    py = [[is_submit(t), bool(DENY_RE.search(t)), is_consent(t), is_consent(t, checkbox=True)] for t in labels]
     assert js == py

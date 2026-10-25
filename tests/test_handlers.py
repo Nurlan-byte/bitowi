@@ -1,5 +1,6 @@
 """Telegram routing through a real Dispatcher; Bot API calls are recorded, not sent."""
 
+import json
 from datetime import datetime
 
 import pytest
@@ -11,7 +12,7 @@ from app.agents.fakes import FakeBoss, FakeWorker
 from app.bot.handlers import HELP, build_router
 from app.bot.keyboards import TaskAction
 from app.bot.notifier import TelegramNotifier
-from app.course.models import Decision
+from app.course.models import Action, ActionResult, Decision
 from app.course.runner import CourseRunner
 from app.orchestrator import Orchestrator, State
 
@@ -75,7 +76,7 @@ async def waiting_task(orch):
     return task
 
 
-@pytest.mark.parametrize("cmd", ["/status", "/stop", "/resume", "/history"])
+@pytest.mark.parametrize("cmd", ["/status", "/stop", "/resume", "/history", "/screen", "/log"])
 async def test_commands_are_not_help(env, cmd):
     replies = await send(env, cmd)
     assert replies and HELP not in replies
@@ -277,3 +278,95 @@ async def test_course_command_with_instructions(course_env):
     assert st["url"] == "https://lms.example.kz/course/view.php?id=7"
     assert st["instructions"] == "только тесты, пропускай форумы"
     assert any("указания приняты" in r for r in replies)
+
+
+async def test_screen_and_log_without_course(env):
+    assert await send(env, "/screen") == ["Курсов нет."]
+    assert await send(env, "/log") == ["Курсов нет."]
+
+
+async def test_course_screen_and_log(course_env, notifier):
+    orch = course_env[0]
+    task = await waiting_course(course_env)
+    root = orch.course.boss_dir(task.id)
+    (root / "steps" / "7").mkdir(parents=True)
+    (root / "steps" / "7" / "1.png").write_bytes(b"\x89PNG")
+    miss = ActionResult(action=Action(action="click", element=67), ok=False, error="действие не удалось",
+                        detail="Клик перекрыт окном просмотра результатов")
+    st = await orch.db.get_course(task.id)
+    st["last_results"] = [miss.model_dump()]
+    await orch.db.save_course(task.id, st)
+    entries = [
+        {"step": 6, "status": "continue", "title": "Graded Quiz", "comment": "открываю следующее задание",
+         "actions": [{"action": "click", "element": 67, "value": ""}], "results": [miss.model_dump()]},
+        {"step": 7, "status": "owner_submit", "url": "u", "results": []},
+    ]
+    (root / "journal.jsonl").write_text("".join(json.dumps(e, ensure_ascii=False) + "\n" for e in entries), encoding="utf-8")
+
+    # на паузе тоже работает
+    await send(course_env, "/stop")
+    assert await send(course_env, "/screen") == []
+    shots, caption = notifier.albums[-1]
+    assert [p.name for p in shots] == ["1.png"] and caption == f"Курс #{task.id} · шаг 7"
+    report = notifier.messages[-1]
+    assert report.startswith(f"Курс #{task.id} · на паузе")
+    assert "Исполнитель (шаг 6, continue): открываю следующее задание" in report
+    assert "✗ click [67]: действие не удалось (Клик перекрыт окном просмотра результатов)" in report
+
+    log = (await send(course_env, "/log 1"))[0]
+    assert "7. owner_submit" in log and "6. continue" not in log
+    log = (await send(course_env, "/log abc"))[0]
+    assert "6. continue · Graded Quiz" in log and "действий 1, выполнено 0" in log
+
+
+async def consent_waiting(env, task=None):
+    orch = env[0]
+    task = task or await waiting_course(env)
+    st = await orch.db.get_course(task.id)
+    st["pending"] = None
+    st["consent"] = {"action": {"action": "click", "element": 5, "value": ""}, "label": "I understand", "text": "Кодекс"}
+    await orch.db.save_course(task.id, st)
+    return task
+
+
+async def test_course_consent_buttons(course_env):
+    orch = course_env[0]
+    task = await consent_waiting(course_env)
+    # «Отправить» старого превью согласие не нажимает
+    sent = await press(course_env, "submit", task.id)
+    assert any(isinstance(m, AnswerCallbackQuery) and m.text == "Задача уже не ждёт подтверждения" for m in sent)
+    assert orch.course.submitted == 0
+
+    sent = await press(course_env, "consent_yes", task.id)
+    assert any(isinstance(m, AnswerCallbackQuery) and m.text == "Нажимаю" for m in sent)
+    assert any(isinstance(m, EditMessageReplyMarkup) for m in sent)
+    assert orch.course.submitted == 1 and (await orch.db.get_task(task.id)).state == State.AWAIT_CONFIRM
+
+    task = await consent_waiting(course_env, task)
+    await press(course_env, "consent_no", task.id)
+    st = await orch.db.get_course(task.id)
+    assert st["consent"] is None and "Владелец отказался нажимать «I understand» [5]" in st["notes"][0]
+
+    task = await consent_waiting(course_env, task)
+    sent = await press(course_env, "consent_pause", task.id)
+    assert (await orch.db.get_task(task.id)).state == State.PAUSED
+    assert (await orch.db.get_course(task.id))["consent"] is None
+    sent = await press(course_env, "consent_yes", task.id)
+    assert any(isinstance(m, AnswerCallbackQuery) and m.text == "Курс уже не ждёт решения" for m in sent)
+
+
+async def test_consent_preview_message(db, settings, tmp_path):
+    bot = RecordingBot()
+    try:
+        notifier = TelegramNotifier(bot, OWNER, db)
+        task = await db.create_task("course", "https://lms.example.kz/course", State.AWAIT_CONFIRM)
+        shot = tmp_path / "1.png"
+        shot.write_bytes(b"\x89PNG")
+        await notifier.consent_preview(task, [shot], "Кодекс чести: отвечайте сами.\nI understand", "[5] I understand")
+        assert [type(m).__name__ for m in bot.sent] == ["SendPhoto", "SendMessage"]
+        text = bot.sent[-1].text
+        assert "просит нажать [5] I understand" in text and "Текст на странице (дословно):\nКодекс чести" in text
+        buttons = [b.text for row in bot.sent[-1].reply_markup.inline_keyboard for b in row]
+        assert buttons == ["Нажать", "Не нажимать", "Пауза"]
+    finally:
+        await bot.session.close()

@@ -18,6 +18,21 @@ NAV = (
     r"начать|продолж|далее|назад|следующ|предыдущ|войти|закончить обзор|завершить просмотр|"
     r"\b(?:start|attempt quiz|continue|next|previous|back|log ?in|sign ?in|finish review)\b"
 )
+# текст состояния, а не действие: «Not submitted», «Submitted», «Graded», «Не сдано», «Оценено» —
+# вырезается из подписи перед проверкой на сдачу
+STATUS = (
+    r"\b(?:not )?(?:submitted|graded|completed)\b|(?:не )?(?:отправлен|сдан|оценен|проверен|выполнен)|на проверк"
+)
+# согласие и подтверждение: только после «Нажать» владельца — кнопки по тексту...
+CONSENT = (
+    r"\bi (?:understand|agree|acknowledge|accept|confirm)\b|\baccept\b|\bagree\b|"
+    r"я понимаю|я согласен|я согласна|согласен|согласна|принимаю|подтверждаю"
+)
+# ...и флажки: ещё правила честности и условия
+CONSENT_BOX = (
+    CONSENT + r"|honou?r code|academic integrity|\bterms\b|кодекс чести|академическ|честност|соглашени|"
+    r"условия использования"
+)
 # показ ответа и сброс попытки: заблокированы всегда
 DANGER = r"показать ответ|сброс|\bshow answers?\b|\breveal|\breset"
 # чёрный список режима курса — по тексту элемента
@@ -38,6 +53,9 @@ SUBMIT_CLASSES = ".submit, .show, .reset, .check, .save, [data-bitowi-forbidden]
 _FLAGS = re.IGNORECASE
 SUBMIT_RE = re.compile(SUBMIT, _FLAGS)
 NAV_RE = re.compile(NAV, _FLAGS)
+STATUS_RE = re.compile(STATUS, _FLAGS)
+CONSENT_RE = re.compile(CONSENT, _FLAGS)
+CONSENT_BOX_RE = re.compile(CONSENT_BOX, _FLAGS)
 DANGER_RE = re.compile(DANGER, _FLAGS)
 DENY_RE = re.compile(DENY, _FLAGS)
 DENY_HREF_RE = re.compile(DENY_HREF, _FLAGS)
@@ -48,13 +66,24 @@ ALLOW_KEY = "__bitowiAllow"
 Mode = Literal["extract", "course"]
 
 
-def is_submit(label: str, submit_class: bool = False) -> bool:
-    """Same rule as forbidden() in guard.js: a submit/check button, not plain navigation."""
+def is_submit(label: str, submit_class: bool = False, nav_item: bool = False) -> bool:
+    """Same rule as isSubmit() in guard.js: a submit/check button, not plain navigation.
+
+    nav_item — a link to another page or a menu item (navItem() in guard.js and overlay.js): never a
+    submission, only «show answer» / reset stay forbidden."""
+    label = STATUS_RE.sub(" ", label)
     if DANGER_RE.search(label):
         return True
+    if nav_item:
+        return False
     if submit_class:
         return not NAV_RE.search(label) or bool(SUBMIT_RE.search(label))
     return bool(SUBMIT_RE.search(label)) and not NAV_RE.search(label)
+
+
+def is_consent(label: str, checkbox: bool = False) -> bool:
+    """Same rule as isConsent() in guard.js: «I understand», «Согласен», an honor code checkbox."""
+    return bool((CONSENT_BOX_RE if checkbox else CONSENT_RE).search(label))
 
 
 def guard_script(mode: Mode, net=None) -> str:
@@ -67,6 +96,9 @@ def guard_script(mode: Mode, net=None) -> str:
         "mode": mode,
         "submit": SUBMIT,
         "nav": NAV,
+        "status": STATUS,
+        "consent": CONSENT,
+        "consent_box": CONSENT_BOX,
         "danger": DANGER,
         "deny": DENY,
         "deny_href": DENY_HREF,

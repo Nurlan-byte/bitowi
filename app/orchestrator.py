@@ -57,6 +57,8 @@ class Notifier(Protocol):
     async def message(self, task: Task, text: str) -> None: ...
     async def photo(self, task: Task, path: Path, caption: str) -> None: ...
     async def course_preview(self, task: Task, shots: list[Path], answers: list[str], button: str) -> None: ...
+    async def consent_preview(self, task: Task, shots: list[Path], text: str, button: str) -> None: ...
+    async def album(self, task: Task, shots: list[Path], caption: str) -> None: ...
 
 
 class Sessions(Protocol):
@@ -156,6 +158,8 @@ class Orchestrator:
         task = await self.db.get_task(task_id)
         if not task or task.state != State.AWAIT_CONFIRM:
             return False
+        if task.kind == "course" and await self.course.has_consent(task):
+            return False  # ждёт решения про согласие — у него свои кнопки
         if task.kind == "course":
             # курьер нажимает отложенные кнопки сдачи, курс идёт дальше
             await self.db.add_event(task_id, "owner_submit")
@@ -166,6 +170,49 @@ class Orchestrator:
         await self._finish(task, State.DONE)
         await self._kick()
         return True
+
+    async def consent(self, task_id: int, choice: str) -> bool:
+        """[Нажать] (yes) [Не нажимать] (no) [Пауза] (pause) under a consent request."""
+        task = await self.db.get_task(task_id)
+        if not task or task.kind != "course" or task.state != State.AWAIT_CONFIRM or not await self.course.has_consent(task):
+            return False
+        if choice == "pause":
+            return await self.pause_course(task_id, "согласие не подтверждено") is not None
+        if choice == "yes":
+            # курьер нажимает ровно этот элемент, курс идёт дальше
+            await self.course.approve_consent(task)
+            await self.db.add_event(task_id, "owner_consent")
+            await self.db.update_task(task_id, state=State.SUBMITTING)
+        else:
+            await self.course.decline_consent(task)
+            await self.db.add_event(task_id, "owner_decline")
+            await self.db.update_task(task_id, state=State.COURSE)
+        self._start(task_id)
+        return True
+
+    async def course_task(self) -> Task | None:
+        """The current course or, if none, the most recent one — for /screen and /log."""
+        task = await self.active_task()
+        if task and task.kind == "course":
+            return task
+        return next((t for t in await self.db.last_tasks(20) if t.kind == "course"), None)
+
+    async def show_screen(self, state_ru: dict[str, str]) -> Task | None:
+        """/screen: the last kept screenshots with numbers and the step report (works on pause)."""
+        task = await self.course_task()
+        if not task or not self.course:
+            return None
+        step, shots = self.course.last_shots(task.id)
+        if shots:
+            await self.notifier.album(task, shots, f"Курс #{task.id} · шаг {step}")
+        await self.notifier.message(task, await self.course.screen_report(task, state_ru.get(task.state, task.state)))
+        return task
+
+    async def course_log(self, n: int) -> str | None:
+        task = await self.course_task()
+        if not task or not self.course:
+            return None
+        return self.course.log_report(task, n)
 
     async def request_fix(self, task_id: int, text: str) -> bool:
         """Owner's correction from Telegram: goes to the notebook as the client's remark."""

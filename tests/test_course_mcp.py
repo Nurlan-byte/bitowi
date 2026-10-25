@@ -70,6 +70,35 @@ async def test_courier_report_parsed(settings, tmp_path, monkeypatch):
     assert "lms.test" not in seen["stdin"]  # в промпте курьера — только действия
 
 
+async def test_courier_failures_without_prompt(settings, tmp_path, monkeypatch):
+    """Timeout of the wrapper (124), of the bot (330 s) and an error: a short message, the output — in detail."""
+    monkeypatch.setattr(runner, "resolve_bin", lambda name: name)
+    from app.agents.base import AgentError, AgentTimeout
+    from app.course.models import Action
+
+    outcomes = [124, "timeout", 1]
+
+    async def fake_run(cmd, *, cwd, timeout, stdin):
+        rc = outcomes.pop(0)
+        if rc == "timeout":
+            raise AgentTimeout(f"sudo: таймаут {timeout} с")
+        # codex повторяет промпт в stderr
+        err = f"OpenAI Codex v0.163.0\nuser\n{stdin}\n" + ("ERROR: stream disconnected before completion\n" if rc == 1 else "")
+        return runner.RunResult(rc, "", err)
+
+    ex = CodexExecutor(settings, run=fake_run)
+    run = lambda: ex.run(FakeBrowser(), [Action(action="click", element=20)], tmp_path / "run", False)  # noqa: E731
+    for _ in range(2):
+        with pytest.raises(AgentTimeout) as exc:
+            await run()
+        assert str(exc.value) == f"Курьер: не ответил за {settings.courier_timeout} с"
+        assert "## Действия" not in str(exc.value) + exc.value.detail
+    with pytest.raises(AgentError) as exc:
+        await run()
+    assert str(exc.value) == "Курьер: код 1: ERROR: stream disconnected before completion"
+    assert "## Действия" not in exc.value.detail and "stream disconnected" in exc.value.detail
+
+
 @pytest.mark.e2e
 @pytest.mark.skipif(not MCP_BIN, reason="playwright-mcp не установлен")
 async def test_mcp_over_cdp_sees_numbers_and_guard_holds(settings, tmp_path, lms):

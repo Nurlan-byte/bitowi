@@ -146,7 +146,13 @@ async def test_runner_stdin_and_output(tmp_path):
 
 def test_looks_like_limit():
     assert runner.looks_like_limit("Error 429 Too Many Requests")
+    # курсы #12 и #13: лимит сессии Claude
+    assert runner.looks_like_limit("You've hit your session limit · resets 1:40pm (UTC)")
     assert not runner.looks_like_limit("ответ: 391")
+    assert not runner.looks_like_limit("Time limit: 15 min")
+    with pytest.raises(AgentLimit):
+        parse_output(RunResult(1, json.dumps({"result": "You've hit your session limit · resets 1:40pm (UTC)",
+                                              "is_error": True}), ""))
 
 
 # --- этап 2: браузер куратора ---

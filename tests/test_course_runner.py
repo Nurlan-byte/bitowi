@@ -8,6 +8,7 @@ import pytest
 pytest.importorskip("playwright")
 pytest.importorskip("uvicorn")
 
+from app.agents.base import AgentTimeout  # noqa: E402
 from app.agents.fakes import FakeBoss, FakeWorker  # noqa: E402
 from app.browser.session import BrowserSessions  # noqa: E402
 from app.course.courier import DirectExecutor  # noqa: E402
@@ -33,9 +34,23 @@ def lms_settings(settings, lms):
     return settings
 
 
-def make(settings, db, notifier, worker) -> Orchestrator:
-    course = CourseRunner(settings, db, worker, notifier, BrowserSessions(settings), DirectExecutor())
+def make(settings, db, notifier, worker, executor=None) -> Orchestrator:
+    course = CourseRunner(settings, db, worker, notifier, BrowserSessions(settings), executor or DirectExecutor())
     return Orchestrator(settings, db, FakeBoss(), worker, notifier, None, course)
+
+
+class FlakyExecutor(DirectExecutor):
+    """Fails the listed calls (1-based) like the wrapper's timeout: before any click, output with the prompt."""
+
+    def __init__(self, fail=()) -> None:
+        self.fail = set(fail)
+        self.calls = 0
+
+    async def run(self, browser, actions, run_dir, allow_upload):
+        self.calls += 1
+        if self.calls in self.fail:
+            raise AgentTimeout("Курьер: не ответил за 300 с", detail="user\n## Действия\n[{\"i\": 1}]")
+        return await super().run(browser, actions, run_dir, allow_upload)
 
 
 async def state(orch, task_id):
@@ -188,6 +203,49 @@ async def test_consent_declined_and_paused(lms_settings, db, notifier, lms):
         await orch.wait_idle()
         assert await state(orch, task.id) == State.AWAIT_CONFIRM and len(notifier.consent_previews) == 3
         assert stats(lms)["consents"] == 0
+    finally:
+        await orch.course.close()
+
+
+async def test_courier_failure_retried_then_paused(lms_settings, db, notifier, lms):
+    lms_settings.courier_timeout = 300
+    # один сбой: следующий шаг по свежему экрану, курс идёт дальше
+    bot = CourseBot()
+    ex = FlakyExecutor(fail={1})
+    orch = make(lms_settings, db, notifier, FakeWorker(decisions=[bot] * 40), ex)
+    try:
+        task = await orch.submit_course(lms + "/course")
+        await orch.wait_idle()
+        assert await state(orch, task.id) == State.AWAIT_CONFIRM
+        failed = [e for e in orch.course.journal(task.id) if e.get("status") == "courier_failed"]
+        assert len(failed) == 1 and not failed[0]["pause"] and "## Действия" in failed[0]["detail"]
+        # исполнитель видит нейтральное «результат неизвестен», без слов об агентах
+        assert "результат действия неизвестен" in bot.inputs[1] and not agent_words(bot.inputs[1])
+
+        # сбой на «Отправить»: кнопка не нажимается вслепую повторно — новый шаг, новое превью
+        ex.fail = {ex.calls + 1}
+        assert await orch.confirm(task.id)
+        await orch.wait_idle()
+        assert await state(orch, task.id) == State.AWAIT_CONFIRM
+        assert len(notifier.course_previews) == 2 and stats(lms)["quiz_checks"] == 0
+        await orch.cancel(task.id)
+    finally:
+        await orch.course.close()
+
+    # два сбоя подряд: пауза с понятной причиной, без вывода курьера; /resume — дальше
+    ex = FlakyExecutor(fail={1, 2})
+    orch = make(lms_settings, db, notifier, FakeWorker(decisions=[CourseBot()] * 40), ex)
+    try:
+        task = await orch.submit_course(lms + "/course")
+        await orch.wait_idle()
+        assert await state(orch, task.id) == State.PAUSED
+        msg = notifier.messages[-1]
+        assert "курьер не ответил за 300 с. Продолжить — /resume" in msg and "Действия" not in msg
+        log = orch.course.log_report(task, 5)
+        assert "курьер не ответил за 300 с — пауза" in log and "Действия" not in log
+        await orch.resume()
+        await orch.wait_idle()
+        assert await state(orch, task.id) == State.AWAIT_CONFIRM
     finally:
         await orch.course.close()
 

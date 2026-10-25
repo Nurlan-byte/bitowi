@@ -34,7 +34,13 @@ def parse_json(text: str) -> dict[str, Any]:
 
 
 class AgentError(Exception):
-    """Generic agent failure (bad exit code, unparsable output)."""
+    """Generic agent failure (bad exit code, unparsable output).
+
+    detail — the raw tail of the CLI output: for the internal journal, never for the owner's message."""
+
+    def __init__(self, message: str = "", detail: str = "") -> None:
+        super().__init__(message)
+        self.detail = detail
 
 
 class AgentTimeout(AgentError):

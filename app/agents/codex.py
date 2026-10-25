@@ -2,13 +2,14 @@
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
 from app.agents import runner
-from app.agents.base import AgentError, AgentLimit, BossBadJSON, fill, parse_json
+from app.agents.base import AgentError, AgentLimit, AgentTimeout, BossBadJSON, fill, parse_json
 from app.config import Settings
 
 log = logging.getLogger(__name__)
@@ -19,6 +20,18 @@ FIX_JSON = (
 )
 
 M = TypeVar("M", bound=BaseModel)
+
+# код выхода `timeout` (coreutils): обёртка курьера сняла codex по своему таймауту
+TIMEOUT_EXIT = 124
+# хвост вывода CLI — во внутренний журнал
+DETAIL_CHARS = 1000
+_ERROR_LINE_RE = re.compile(r"^\s*error\b[:\s]", re.IGNORECASE)
+
+
+def error_line(text: str) -> str:
+    """The last «ERROR: …» line of the CLI output, if any."""
+    lines = [ln.strip() for ln in text.splitlines() if _ERROR_LINE_RE.match(ln)]
+    return lines[-1][:200] if lines else ""
 
 
 def toml_value(value: Any) -> str:
@@ -83,16 +96,29 @@ class CodexAgent:
             ]
         return cmd
 
+    @property
+    def wrapper_timeout(self) -> int:
+        """The limit the owner sees in «не ответил за N с» (the courier's wrapper has its own `timeout`)."""
+        return self.timeout
+
     async def _call(self, task_dir: Path, prompt: str, cmd: list[str]) -> str:
         task_dir.mkdir(parents=True, exist_ok=True)
         out_file = task_dir / self.out_name
         out_file.unlink(missing_ok=True)
-        res = await self._run(cmd, cwd=task_dir, timeout=self.timeout, stdin=prompt)
+        try:
+            res = await self._run(cmd, cwd=task_dir, timeout=self.timeout, stdin=prompt)
+        except AgentTimeout as exc:
+            raise AgentTimeout(f"{self.who}: не ответил за {self.wrapper_timeout} с", detail=str(exc)) from exc
         if res.returncode != 0:
-            text = res.stderr + res.stdout
+            # codex повторяет промпт в stderr: ни в сообщение, ни в поиск лимита он не идёт
+            text = (res.stderr + res.stdout).replace(prompt, "").strip()
+            detail = text[-DETAIL_CHARS:]
+            if res.returncode == TIMEOUT_EXIT:
+                raise AgentTimeout(f"{self.who}: не ответил за {self.wrapper_timeout} с", detail=detail)
             if runner.looks_like_limit(text):
-                raise AgentLimit(text.strip()[-300:])
-            raise AgentError(f"{self.who}: код {res.returncode}: {text.strip()[-300:]}")
+                raise AgentLimit(text[-300:], detail=detail)
+            line = error_line(text)
+            raise AgentError(f"{self.who}: код {res.returncode}" + (f": {line}" if line else ""), detail=detail)
         if out_file.exists():
             return out_file.read_text(encoding="utf-8")
         return res.stdout

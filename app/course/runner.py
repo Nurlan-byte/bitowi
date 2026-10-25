@@ -19,7 +19,7 @@ from app.agents.base import Worker, WorkerBadJSON
 from app.browser.sites import profile_for
 from app.config import Settings
 from app.course.browser import CourseBrowser
-from app.course.courier import Courier, Executor
+from app.course.courier import Courier, ExecResult, Executor
 from app.course.models import Action, ActionResult, Screen
 from app.browser.session import is_login_url
 from app.course.netpolicy import host_port, split_course_input
@@ -38,6 +38,8 @@ MAX_ACTIONS_PER_STEP = 60
 KEEP_STEPS = 10
 # дословный текст рядом с кнопкой согласия — владельцу, в одно сообщение Telegram
 CONSENT_TEXT = 3000
+# сбой курьера: столько повторов подряд (следующим шагом, по свежему экрану), потом пауза
+COURIER_RETRIES = 1
 
 _SCORE_RE = re.compile(r"(?:балл\w*|оценка|сдан\w*|итог\w*|mark|grade|score)\s*:?\s*\d+(?:[.,]\d+)?\s*(?:из|/|out of)\s*\d+(?:[.,]\d+)?",
                        re.IGNORECASE)
@@ -102,6 +104,9 @@ def journal_lines(e: dict[str, Any]) -> str:
         lines.append("ответ не по схеме: " + "; ".join(e.get("errors", []))[:200])
     if e.get("status") == "domains":
         lines.append("новые внешние домены: " + ", ".join(e.get("new", [])))
+    if e.get("status") == "courier_failed":
+        # вывод курьера (detail) — только в файле журнала
+        lines.append(f"{e.get('reason', '')} — " + ("пауза" if e.get("pause") else "повтор следующим шагом"))
     if e.get("label"):
         lines.append(f"элемент: «{e['label'][:100]}»")
     if e.get("comment"):
@@ -321,6 +326,14 @@ class CourseRunner:
             if res.offsite:
                 await self._after(task, st, screen, decision, results, notes)
                 raise CoursePause("forbidden", "вкладка попала на запрещённый адрес (локальная сеть) — вернул назад. Продолжить — /resume")
+            pause = self._courier_failed(task, st, res)
+            if res.failed:
+                # сдача и согласие этого шага — по неизвестному экрану не предлагаем
+                await self._after(task, st, screen, decision, results, notes)
+                if pause:
+                    await self._save(task, st)
+                    raise CoursePause("courier_failed", pause)
+                continue
 
             if plan.pending_consent:
                 # согласие — всегда через владельца, AUTO_SUBMIT и разрешение после сдачи на него не действуют
@@ -340,6 +353,10 @@ class CourseRunner:
                 if sub.offsite:
                     await self._after(task, st, screen, decision, results, notes)
                     raise CoursePause("forbidden", "вкладка попала на запрещённый адрес (локальная сеть) — вернул назад. Продолжить — /resume")
+                if pause := self._courier_failed(task, st, sub):
+                    await self._after(task, st, screen, decision, results, notes)
+                    await self._save(task, st)
+                    raise CoursePause("courier_failed", pause)
             elif plan.pending_submit:
                 await self._after(task, st, screen, decision, results, notes)
                 await self._preview(task, st, screen, plan.pending_submit, decision.answers)
@@ -366,6 +383,26 @@ class CourseRunner:
             raise CoursePause("domain_limit", f"курс ведёт на {host} — сверх лимита внешних доменов "
                                               f"({self.settings.course_max_external_domains}, уже: {', '.join(st['external'])}). "
                                               "Подскажи ответом, как продолжить, и /resume")
+
+    def _courier_failed(self, task: Task, st: dict[str, Any], res: ExecResult) -> str:
+        """'' — go on; otherwise the pause text. The first failure in a row is retried by the next step:
+        it reads the screen afresh, so a click that went through before the failure is not repeated blindly.
+        A limit — a pause at once. Details go to the journal only."""
+        if not res.failed:
+            if res.results:
+                st["courier_fails"] = 0
+            return ""
+        st["grant"] = 0
+        # экран не сменился, потому что действия не выполнены, — это не застревание исполнителя
+        st["screen_hash"] = ""
+        st["courier_fails"] = st.get("courier_fails", 0) + 1
+        pause = res.limit or st["courier_fails"] > COURIER_RETRIES
+        self._journal_line(task, {"step": st["step"], "status": "courier_failed", "reason": res.failed,
+                                  "detail": res.failed_detail, "pause": pause})
+        if not pause:
+            return ""
+        st["courier_fails"] = 0
+        return f"{res.failed}. Продолжить — /resume"
 
     async def _login_wall(self, task: Task, st: dict[str, Any], screen: Screen) -> None:
         """A login page: outside the course domain the bot is never logged in; on it — the session expired."""
@@ -432,9 +469,13 @@ class CourseRunner:
                                   "results": st["last_results"]})
         await self._net(task, st, st["notes"])
         await self.db.add_event(task.id, "course_submit", {"ok": all(r.ok for r in res.results)})
+        # повтор — не повторное нажатие: следующий шаг смотрит, прошла ли сдача, новая — снова через владельца
+        pause = self._courier_failed(task, st, res)
         await self._save(task, st)
         if res.offsite:
             raise CoursePause("forbidden", "вкладка попала на запрещённый адрес (локальная сеть) — вернул назад. Продолжить — /resume")
+        if pause:
+            raise CoursePause("courier_failed", pause)
 
     async def _press_consent(self, task: Task, st: dict[str, Any]) -> None:
         """After the owner's «Нажать»: the courier presses exactly the consent element, if the page is the same."""
@@ -460,9 +501,12 @@ class CourseRunner:
                                   "label": consent["label"], "results": st["last_results"]})
         await self._net(task, st, st["notes"])
         await self.db.add_event(task.id, "course_consent", {"ok": all(r.ok for r in res.results)})
+        pause = self._courier_failed(task, st, res)
         await self._save(task, st)
         if res.offsite:
             raise CoursePause("forbidden", "вкладка попала на запрещённый адрес (локальная сеть) — вернул назад. Продолжить — /resume")
+        if pause:
+            raise CoursePause("courier_failed", pause)
 
     # --- помощники ---
     async def _track(self, task: Task, st: dict[str, Any], screen: Screen) -> None:

@@ -15,7 +15,8 @@ from app.agents.base import AgentError, AgentTimeout
 log = logging.getLogger(__name__)
 
 _LIMIT_RE = re.compile(
-    r"usage limit|rate[ _-]?limit|quota exceeded|too many requests|\b429\b|limit reached|out of credits",
+    r"(?:usage|session|weekly|daily) limit|hit your \w* ?limit|rate[ _-]?limit|quota exceeded|"
+    r"too many requests|\b429\b|limit reached|out of credits",
     re.IGNORECASE,
 )
 

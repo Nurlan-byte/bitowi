@@ -15,6 +15,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, field_validator
 
 from app.agents import runner
+from app.agents.base import AgentError, AgentLimit, AgentTimeout, BossBadJSON
 from app.agents.codex import CodexAgent, toml_value
 from app.browser.guard import write_guard
 from app.config import Settings
@@ -86,6 +87,22 @@ class ExecResult(BaseModel):
     progress: str = ""
     # главная вкладка ушла с домена курса (откатили) — шаг остановлен
     offsite: str = ""
+    # курьер не отработал (таймаут, ошибка, лимит): причина — владельцу, detail — в журнал;
+    # у невыполненных действий — NO_REPORT
+    failed: str = ""
+    failed_detail: str = ""
+    limit: bool = False
+
+
+def failure_reason(exc: AgentError, timeout: int) -> str:
+    """For the owner: what happened to the courier, without its output."""
+    if isinstance(exc, AgentTimeout):
+        return f"курьер не ответил за {timeout} с"
+    if isinstance(exc, AgentLimit):
+        return "у курьера закончился лимит подписки"
+    if isinstance(exc, BossBadJSON):
+        return "курьер дважды вернул ответ не по схеме"
+    return "курьер завершился с ошибкой"
 
 
 class Executor(ABC):
@@ -144,6 +161,10 @@ class CodexExecutor(CodexAgent, Executor):
     def timeout(self) -> int:
         # запас поверх таймаута обёртки (timeout --kill-after=10 внутри)
         return self.settings.courier_timeout + (30 if self.sudo else 0)
+
+    @property
+    def wrapper_timeout(self) -> int:
+        return self.settings.courier_timeout
 
     def mcp_command(self) -> str:
         return self.settings.courier_mcp_bin if self.sudo else super().mcp_command()
@@ -236,6 +257,14 @@ class Courier:
                 else:
                     await self.browser.scroll(a.value)
                     out.results.append(ActionResult(action=a, ok=True))
+        except AgentError as exc:
+            # что успели — с результатами, остальное неизвестно: клик мог пройти до сбоя
+            out.failed = failure_reason(exc, self.settings.courier_timeout)
+            out.failed_detail = f"{exc}\n{exc.detail}".strip()
+            out.limit = isinstance(exc, AgentLimit)
+            log.warning("courier failed: %s", exc)
+            out.results += [ActionResult(action=a, ok=False, error=NO_REPORT, detail=out.failed)
+                            for a in actions[len(out.results):]]
         finally:
             if allow_submit:
                 await self.browser.revoke_submit()

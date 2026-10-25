@@ -67,7 +67,7 @@ async def test_limit_pauses_and_resume(settings, db, notifier):
     task = await run_text(orch)
     assert task.state == State.PAUSED
     assert task.resume_state == State.SOLVING
-    assert "/resume" in notifier.statuses[-1]
+    assert "/resume" in notifier.messages[-1]
 
     assert await orch.resume()
     await orch.wait_idle()
@@ -179,3 +179,15 @@ async def test_ai_phrases_stripped_before_boss(settings, db, notifier):
     orch = make(settings, db, notifier, boss, FakeWorker([reply]))
     await run_text(orch)
     assert "ИИ" not in boss.calls[0]["notebook"]
+
+
+async def test_pause_reason_is_a_new_message(settings, db, notifier):
+    # курс #12: причина паузы ушла правкой в старое статусное сообщение выше «Продолжаю задачу»
+    orch = make(settings, db, notifier, FakeBoss(), FakeWorker())
+    task = await run_text(orch)
+    await db.update_task(task.id, status_msg_id=86)
+    await orch._pause(task.id, "stuck", "нет входа", "нет входа. Продолжить — /resume")
+    task = await db.get_task(task.id)
+    assert task.state == State.PAUSED and task.status_msg_id is None
+    assert notifier.messages[-1] == f"Задача #{task.id} на паузе: нет входа. Продолжить — /resume"
+    assert notifier.statuses[-1] == f"Задача #{task.id} на паузе — причина в сообщении ниже"

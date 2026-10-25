@@ -88,7 +88,7 @@ async def test_session_expired_pauses_and_resumes(settings, db, notifier):
     task = await orch.submit_url(URL)
     task = await settle(orch, task.id, (State.PAUSED,))
     assert task.state == State.PAUSED and task.resume_state == State.EXTRACTING
-    assert "state.json" in notifier.statuses[-1] and HOST in notifier.statuses[-1]
+    assert "state.json" in notifier.messages[-1] and HOST in notifier.messages[-1]
 
     await orch.resume()
     task = await settle(orch, task.id, (State.AWAIT_CONFIRM, State.FAILED))
@@ -101,7 +101,7 @@ async def test_boss_sees_login_page_pauses(settings, db, notifier):
     task = await orch.submit_url(URL)
     task = await settle(orch, task.id, (State.PAUSED, State.FAILED))
     assert task.state == State.PAUSED
-    assert "/resume" in notifier.statuses[-1]
+    assert "/resume" in notifier.messages[-1]
 
 
 async def test_no_task_on_page_fails(settings, db, notifier):
@@ -161,3 +161,19 @@ async def test_text_tasks_unaffected_by_browser(settings, db, notifier, sessions
     task = await orch.submit_text("17*23?")
     task = await settle(orch, task.id, (State.AWAIT_CONFIRM,))
     assert task.final_answer == "391" and sessions.calls == []
+
+
+def test_state_file_of_parent_domain(settings):
+    from app.browser.sites import profile_for
+
+    # курс #12: ссылка на www.coursera.org, файл подписан «coursera.org»
+    url = "https://www.coursera.org/learn/sql/home/module/1"
+    assert profile_for(url, settings).auth_file.name == "www.coursera.org.json"
+    settings.auth_dir.mkdir(parents=True, exist_ok=True)
+    (settings.auth_dir / "coursera.org.json").write_text("{}", encoding="utf-8")
+    assert profile_for(url, settings).auth_file.name == "coursera.org.json"
+    # файл точного хоста — первым
+    (settings.auth_dir / "www.coursera.org.json").write_text("{}", encoding="utf-8")
+    assert profile_for(url, settings).auth_file.name == "www.coursera.org.json"
+    # адрес с портом и IP — только точный файл
+    assert profile_for("http://10.0.0.5:8000/x", settings).auth_file.name == "10.0.0.5_8000.json"

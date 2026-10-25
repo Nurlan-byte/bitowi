@@ -11,7 +11,8 @@ from pathlib import Path
 import pytest
 
 from app.agents import runner
-from app.agents.boss_codex import CODEX_LOCKDOWN, CodexBoss
+from app.agents.boss_codex import CodexBoss
+from app.agents.codex import CODEX_LOCKDOWN
 from app.course.courier import Courier, CodexExecutor, DirectExecutor, upload_dir
 from app.course.models import Action
 from app.course.netpolicy import NetPolicy

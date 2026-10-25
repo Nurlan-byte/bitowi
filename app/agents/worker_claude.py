@@ -11,8 +11,7 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from app.agents import runner
-from app.agents.base import AgentError, AgentLimit, Worker, WorkerBadJSON
-from app.agents.boss_codex import fill, parse_json
+from app.agents.base import AgentError, AgentLimit, Worker, WorkerBadJSON, fill, parse_json
 from app.config import Settings
 from app.course.models import Decision
 

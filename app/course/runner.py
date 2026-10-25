@@ -303,8 +303,10 @@ class CourseRunner:
         st["fail_steps"] = st.get("fail_steps", 0) + 1
         if st["fail_steps"] >= self.settings.course_fail_repeats:
             await self._save(task, st)
+            # владельцу — подробность (слова курьера), воркеру она не идёт
+            why = results[0].detail or results[0].error
             raise CoursePause("fail_steps", f"{st['fail_steps']} шага подряд не выполнено ни одно действие "
-                                            f"(«{results[0].error[:120]}»). Подскажи ответом на это сообщение и /resume")
+                                            f"(«{why[:120]}»). Подскажи ответом на это сообщение и /resume")
 
     async def submit(self, task: Task) -> None:
         """After the owner's «Отправить»: the courier presses the pending submit buttons."""

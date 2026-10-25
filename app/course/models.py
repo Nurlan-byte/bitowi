@@ -96,7 +96,10 @@ class Element(BaseModel):
 class ActionResult(BaseModel):
     action: Action
     ok: bool
+    # для воркера — только фразы из кода (courier.ERRORS, policy)
     error: str = ""
+    # слова того, кто кликал (исключение Playwright, текст курьера) — только во внутренний журнал
+    detail: str = ""
 
 
 class Screen(BaseModel):

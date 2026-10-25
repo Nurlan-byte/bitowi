@@ -246,8 +246,15 @@ class Orchestrator:
         await self.course.drop_pending(task)
         task = await self.db.update_task(task_id, state=State.PAUSED, resume_state=State.COURSE)
         await self.db.add_event(task_id, "paused", why)
-        await self.notifier.status(task, f"Курс #{task_id} на паузе ({why}). Продолжить — /resume, отменить — /stop")
+        await self._announce_pause(task, f"Курс #{task_id} на паузе ({why}). Продолжить — /resume, отменить — /stop")
         return task
+
+    async def _announce_pause(self, task: Task, text: str) -> None:
+        """The reason goes as a new message: an edit of the status message brings no notification and may
+        sit far above (after /resume). The next status after /resume starts a new message below."""
+        await self.notifier.status(task, f"{self._title(task)} на паузе — причина в сообщении ниже")
+        await self.notifier.message(task, text)
+        await self.db.update_task(task.id, status_msg_id=None)
 
     async def resume(self) -> Task | None:
         paused = await self.db.tasks_in_states((State.PAUSED,))
@@ -354,7 +361,7 @@ class Orchestrator:
         assert task
         task = await self.db.update_task(task_id, state=State.PAUSED, resume_state=task.state)
         await self.db.add_event(task_id, event, detail[:300])
-        await self.notifier.status(task, f"Задача #{task_id} на паузе: {text}")
+        await self._announce_pause(task, f"Задача #{task_id} на паузе: {text}")
 
     async def _loop(self, task_id: int) -> None:
         max_rounds = self.settings.max_rounds

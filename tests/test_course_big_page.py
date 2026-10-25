@@ -122,7 +122,7 @@ async def test_bad_json_twice_pauses_and_resume_continues(lms_settings, db, noti
         await orch.wait_idle()
         task = await db.get_task(task.id)
         assert task.state == State.PAUSED and task.resume_state == State.COURSE  # пауза, а не провал
-        assert "/resume" in notifier.statuses[-1] and "actions.0.action" in notifier.statuses[-1]
+        assert "/resume" in notifier.messages[-1] and "actions.0.action" in notifier.messages[-1]
         # повтор получил понятную ошибку, а не «1 validation error»
         assert "ответ обрывается" in claude.stdins[1] and "Значения value — строки" in claude.stdins[1]
 

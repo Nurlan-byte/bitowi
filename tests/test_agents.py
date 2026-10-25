@@ -6,7 +6,8 @@ import pytest
 
 from app.agents import runner
 from app.agents.base import AgentError, AgentLimit, AgentTimeout, BossBadJSON
-from app.agents.boss_codex import CodexBoss, fill, parse_json
+from app.agents.base import fill, parse_json
+from app.agents.boss_codex import CodexBoss
 from app.agents.runner import RunResult
 from app.agents.worker_claude import ClaudeWorker, parse_output
 

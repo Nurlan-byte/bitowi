@@ -15,6 +15,7 @@ from app.course.models import Decision  # noqa: E402
 from app.course.runner import CourseRunner  # noqa: E402
 from app.orchestrator import Orchestrator, State  # noqa: E402
 from tests.course_bot import CourseBot  # noqa: E402
+from tests.test_course_layers import agent_words  # noqa: E402
 from tests.lms_server import LMS_PASSWORD, LMS_USER, lms, reset, stats  # noqa: E402,F401
 
 pytestmark = pytest.mark.e2e
@@ -76,6 +77,8 @@ async def test_course_passes_with_three_confirmations(lms_settings, db, notifier
         host = lms.split("://", 1)[1]
         for text in bot.inputs:
             assert host not in text and "127.0.0.1" not in text and "Мини-LMS" not in text
+            # и не знает, что кликает кто-то другой
+            assert agent_words(text) == []
         journal = (lms_settings.boss_root / str(task.id) / "journal.jsonl").read_text(encoding="utf-8").splitlines()
         assert json.loads(journal[-1])["status"] == "course_done"
         assert orch.course.browser is None  # браузер закрыт после конца курса
@@ -135,7 +138,7 @@ async def test_same_screen_pauses(lms_settings, db, notifier, lms):
         task = await orch.submit_course(lms + "/course")
         await orch.wait_idle()
         assert await state(orch, task.id) == State.PAUSED
-        assert "тот же экран 3 раза подряд" in notifier.statuses[-1]
+        assert "тот же экран 3 раза подряд" in notifier.messages[-1]
     finally:
         await orch.course.close()
 
@@ -147,7 +150,7 @@ async def test_step_limit_and_stuck_status_pause(lms_settings, db, notifier, lms
         task = await orch.submit_course(lms + "/course")
         await orch.wait_idle()
         assert await state(orch, task.id) == State.PAUSED
-        assert "COURSE_MAX_STEPS" in notifier.statuses[-1]
+        assert "COURSE_MAX_STEPS" in notifier.messages[-1]
         await orch.cancel(task.id)  # пауза занимает слот — освобождаем для следующей задачи
     finally:
         await orch.course.close()
@@ -158,7 +161,7 @@ async def test_step_limit_and_stuck_status_pause(lms_settings, db, notifier, lms
         task = await orch.submit_course(lms + "/course")
         await orch.wait_idle()
         assert await state(orch, task.id) == State.PAUSED
-        assert "нет кнопки «Далее»" in notifier.statuses[-1]
+        assert "нет кнопки «Далее»" in notifier.messages[-1]
     finally:
         await orch.course.close()
 
@@ -173,8 +176,8 @@ async def test_failed_actions_in_a_row_pause(lms_settings, db, notifier, lms):
         task = await orch.submit_course(lms + "/course")
         await orch.wait_idle()
         assert await state(orch, task.id) == State.PAUSED
-        assert "3 шага подряд не выполнено ни одно действие" in notifier.statuses[-1]
-        assert "элемент [999] не найден" in notifier.statuses[-1]
+        assert "3 шага подряд не выполнено ни одно действие" in notifier.messages[-1]
+        assert "элемент [999] не найден" in notifier.messages[-1]
         assert (await db.get_course(task.id))["step"] == 3
     finally:
         await orch.course.close()

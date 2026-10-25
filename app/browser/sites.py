@@ -34,6 +34,20 @@ def auth_file(settings: Settings, host: str) -> Path:
     return settings.auth_dir / (host.replace(":", "_") + ".json")
 
 
+def find_auth_file(settings: Settings, host: str) -> Path:
+    """The owner's state.json for the host or a parent domain (www.coursera.org → coursera.org);
+    none saved — the host's own path."""
+    exact = auth_file(settings, host)
+    labels = host.split(".")
+    if ":" in host or labels[-1].isdigit():
+        return exact
+    for i in range(len(labels) - 1):
+        path = auth_file(settings, ".".join(labels[i:]))
+        if path.exists():
+            return path
+    return exact
+
+
 def profile_for(url: str, settings: Settings) -> SiteProfile:
     host = host_of(url)
     path = auth_file(settings, host)
@@ -57,4 +71,4 @@ def profile_for(url: str, settings: Settings) -> SiteProfile:
             "button[type=submit]",
         ))
     # остальные — state.json, который владелец делает сам (SSO, MFA)
-    return SiteProfile(host, "state", path)
+    return SiteProfile(host, "state", find_auth_file(settings, host))

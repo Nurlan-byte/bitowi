@@ -1,11 +1,36 @@
 """Agent interfaces and shared models. Boss and worker are swappable behind these ABCs."""
 
+import json
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
+
+_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE)
+
+
+def fill(template: str, **values: Any) -> str:
+    """Substitute {name} placeholders without touching JSON braces in the template."""
+    for key, value in values.items():
+        template = template.replace("{" + key + "}", str(value))
+    return template
+
+
+def parse_json(text: str) -> dict[str, Any]:
+    text = _FENCE_RE.sub("", text.strip())
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        start, end = text.find("{"), text.rfind("}")
+        if start == -1 or end <= start:
+            raise
+        data = json.loads(text[start : end + 1])
+    if not isinstance(data, dict):
+        raise ValueError("ожидался JSON-объект")
+    return data
 
 
 class AgentError(Exception):

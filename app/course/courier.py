@@ -10,11 +10,12 @@ import logging
 import shutil
 from abc import ABC, abstractmethod
 from pathlib import Path
+from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from app.agents import runner
-from app.agents.boss_codex import CodexAgent, _toml
+from app.agents.codex import CodexAgent, toml_value
 from app.browser.guard import write_guard
 from app.config import Settings
 from app.course.browser import CourseBrowser
@@ -39,6 +40,18 @@ UPLOAD_TOOL = "browser_file_upload"
 COURIER_BATCH = 20
 
 
+StepCode = Literal["", "not_found", "disabled", "page_changed", "failed"]
+
+# воркеру — только эти фразы: свои слова курьера (error) остаются во внутреннем журнале
+ERRORS = {
+    "not_found": "элемент не найден на странице",
+    "disabled": "элемент неактивен",
+    "page_changed": "страница сменилась — номера устарели",
+    "failed": "действие не удалось",
+}
+NO_REPORT = "результат действия неизвестен"
+
+
 def upload_dir(run_dir: Path) -> Path:
     return run_dir / "uploads"
 
@@ -46,7 +59,17 @@ def upload_dir(run_dir: Path) -> Path:
 class StepReport(BaseModel):
     i: int
     ok: bool
+    code: StepCode = ""
     error: str = ""
+
+    @field_validator("code", mode="before")
+    @classmethod
+    def _code(cls, v: Any) -> Any:
+        # незнакомый код — не повод отвергать весь отчёт
+        return v if v in ERRORS or v == "" else "failed"
+
+    def for_worker(self) -> str:
+        return "" if self.ok else ERRORS.get(self.code, ERRORS["failed"])
 
 
 class CourierReport(BaseModel):
@@ -83,6 +106,9 @@ class DirectExecutor(Executor):
         report = CourierReport()
         for i, a in enumerate(actions, 1):
             loc = page.locator(f'[data-bitowi-n="{a.element}"]')
+            if not await loc.count():
+                report.results.append(StepReport(i=i, ok=False, code="not_found", error="нет элемента с номером"))
+                continue
             try:
                 if a.action == "click":
                     await loc.click(timeout=5000)
@@ -99,7 +125,7 @@ class DirectExecutor(Executor):
                 await page.wait_for_load_state("domcontentloaded")
                 report.results.append(StepReport(i=i, ok=True))
             except Exception as exc:  # noqa: BLE001 — результат действия, не авария
-                report.results.append(StepReport(i=i, ok=False, error=str(exc).splitlines()[0][:200]))
+                report.results.append(StepReport(i=i, ok=False, code="failed", error=str(exc).splitlines()[0][:200]))
         return report
 
 
@@ -153,9 +179,9 @@ class CodexExecutor(CodexAgent, Executor):
         tools = COURIER_TOOLS + ([UPLOAD_TOOL] if allow_upload else [])
         upload_dir(run_dir).mkdir(parents=True, exist_ok=True)
         return self.codex_command(run_dir, self.mcp_args(browser, run_dir)) + [
-            "-c", f"mcp_servers.playwright.enabled_tools={_toml(tools)}",
+            "-c", f"mcp_servers.playwright.enabled_tools={toml_value(tools)}",
             # корень файлов MCP: только файлы, которые код скопировал для одобренной сдачи
-            "-c", f"mcp_servers.playwright.cwd={_toml(str(upload_dir(run_dir)))}",
+            "-c", f"mcp_servers.playwright.cwd={toml_value(str(upload_dir(run_dir)))}",
             "-",
         ]
 
@@ -228,9 +254,9 @@ class Courier:
             if a.element in refused:
                 out.results.append(ActionResult(action=a, ok=False, error=f"элемент [{a.element}] недоступен"))
             elif r is None:
-                out.results.append(ActionResult(action=a, ok=False, error="курьер не сообщил результат"))
+                out.results.append(ActionResult(action=a, ok=False, error=NO_REPORT))
             else:
-                out.results.append(ActionResult(action=a, ok=r.ok, error=r.error))
+                out.results.append(ActionResult(action=a, ok=r.ok, error=r.for_worker(), detail=r.error))
         out.messages += report.messages
         out.progress = report.progress or out.progress
         out.offsite = await self.browser.check_domain()
